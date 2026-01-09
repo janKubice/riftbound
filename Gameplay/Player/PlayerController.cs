@@ -30,6 +30,9 @@ public class PlayerController : NetworkBehaviour
     private float _lastJumpInputTime;
     private float _jumpBufferDuration = 0.2f;
     private bool _wasGroundedLastFrame = true;
+    [Header("Double Jump")]
+    [SerializeField] private int _maxJumps = 2;
+    private int _currentJumpCount;
 
     [Header("Úhyb (Dodge)")]
     [SerializeField] private float _dodgeStaminaCost = 25.0f;
@@ -38,6 +41,15 @@ public class PlayerController : NetworkBehaviour
     [SerializeField] private float _dodgeInvulnerabilityTime = 0.2f; // Musí být <= _dodgeDuration
     private bool _isDodging = false; // Zabrání spamu a blokuje ostatní pohyb během úhybu
     [SerializeField] private AnimationCurve _dodgeCurve = AnimationCurve.EaseInOut(0, 1, 1, 0);
+
+    [Header("Sliding")]
+    [SerializeField] private float _slideSpeed = 10f;
+    [SerializeField] private float _slideDuration = 0.8f;
+    [SerializeField] private float _slideHeight = 1.0f; // Výška collideru při skluzu
+    private float _originalHeight;
+    private Vector3 _originalCenter;
+    private bool _isSliding;
+    public bool IsSliding => _isSliding;
 
     [Header("Look (Pitch)")]
     [SerializeField] private Transform _cameraFollowTarget;
@@ -129,6 +141,9 @@ public class PlayerController : NetworkBehaviour
         _playerAudio = GetComponent<PlayerAudio>();
         _playerVFX = GetComponent<PlayerVFX>();
         _impulseSource = GetComponent<CinemachineImpulseSource>();
+
+        _originalHeight = _controller.height;
+        _originalCenter = _controller.center;
     }
 
     public override void OnDestroy()
@@ -318,6 +333,12 @@ public class PlayerController : NetworkBehaviour
         {
             OnLand(); // Zavoláme novou metodu
         }
+
+        if (_isGrounded)
+        {
+            _currentJumpCount = 0; // Reset skoků na zemi
+        }
+
         _wasGroundedLastFrame = _isGrounded; // Uložíme stav pro příští frame
     }
 
@@ -475,7 +496,7 @@ public class PlayerController : NetworkBehaviour
         bool jumpInputBuffered = Time.time < _lastJumpInputTime + _jumpBufferDuration;
 
         // Musíme být na zemi A mít "nabufferovaný" vstup
-        if (jumpInputBuffered && _isGrounded)
+        if (jumpInputBuffered && (_isGrounded || _currentJumpCount < _maxJumps))
         {
             // --- Zde je "Provedení logiky skoku..." ---
             if (_attributes == null) _attributes = PlayerAttributes.LocalInstance;
@@ -484,6 +505,8 @@ public class PlayerController : NetworkBehaviour
             // Ověříme staminu
             if (_attributes.CurrentStamina.Value >= _jumpStaminaCost)
             {
+                _currentJumpCount++;
+
                 // 1. Spotřebujeme staminu (pošleme na server)
                 _attributes.ConsumeStaminaServerRpc(_jumpStaminaCost);
 
@@ -493,7 +516,9 @@ public class PlayerController : NetworkBehaviour
                 // 3. Spustíme animaci (pošleme přes server všem)
                 TriggerAnimationServerRpc(_jumpTriggerHash);
                 GetComponentInChildren<PlayerSquashStretch>()?.TriggerJumpSquash();
-                // PŘIDEJTE TENTO BLOK:
+                
+                if (_currentJumpCount > 1) _playerVelocity.y = Mathf.Sqrt(_jumpHeight * -2f * _gravityValue); // Můžeš dát menší výšku pro druhý skok
+                
                 if (IsOwner && _playerAudio != null)
                 {
                     _playerAudio.RequestPlaySoundServerRpc(PlayerAudio.AUDIO_JUMP);
@@ -535,6 +560,52 @@ public class PlayerController : NetworkBehaviour
     {
         if (context.performed && _playerEmotes != null)
             _playerEmotes.TryPlayEmote(2); // Index 2 v listu
+    }
+
+    // Metoda volaná z Input Systemu (nutno přidat akci "Crouch" do InputActions)
+    public void OnCrouch(InputAction.CallbackContext context)
+    {
+        if (!IsOwner) return;
+
+        if (context.performed && _isSprinting && _isGrounded && !_isSliding)
+        {
+            StartCoroutine(SlideRoutine());
+        }
+    }
+
+    private IEnumerator SlideRoutine()
+    {
+        _isSliding = true;
+
+        // 1. Zmenšení Collideru
+        _controller.height = _slideHeight;
+        _controller.center = new Vector3(_originalCenter.x, _slideHeight / 2f, _originalCenter.z);
+
+        // 2. Aplikace počátečního impulzu (pokud chceš "boost")
+        // Zde využijeme existující směr pohybu, ne aktuální input (aby nešlo zatáčet)
+        Vector3 slideDirection = transform.forward;
+
+        float timer = 0f;
+        while (timer < _slideDuration)
+        {
+            // 3. Pohyb s postupným zpomalováním (Friction)
+            float currentSlideSpeed = Mathf.Lerp(_slideSpeed, 0f, timer / _slideDuration);
+
+            // Aplikujeme pohyb (gravitace se stále počítá v Update -> HandleGravity)
+            // Pouze horizontální složka
+            _controller.Move(slideDirection * currentSlideSpeed * Time.deltaTime);
+
+            // Pokud hráč vyskočí nebo narazí do zdi, přerušit
+            if (!_isGrounded || _controller.velocity.magnitude < 0.5f) break;
+
+            timer += Time.deltaTime;
+            yield return null;
+        }
+
+        // 4. Návrat do normálu
+        _controller.height = _originalHeight;
+        _controller.center = _originalCenter;
+        _isSliding = false;
     }
 
     private IEnumerator DodgeRoutine(Vector3 dodgeDirection)
