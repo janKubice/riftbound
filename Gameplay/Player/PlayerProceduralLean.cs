@@ -13,68 +13,60 @@ public class PlayerProceduralLean : MonoBehaviour
     [Header("Náklon dopředu (Running)")]
     [SerializeField] private float _runTiltAmount = 1.5f;
 
-    [Header("Skluz (Slide)")]
-    [Tooltip("Úhel záklonu při skluzu (záporná = dozadu).")]
-    [SerializeField] private float _slideBackAngle = -45.0f; // Větší úhel pro dramatičtější efekt
-    [Tooltip("O kolik se model posune dolů při skluzu (aby 'seděl' na zemi).")]
+    [Header("Skluz (Volitelné)")]
+    [SerializeField] private float _slideBackAngle = -45.0f;
     [SerializeField] private float _slideYOffset = -0.8f; 
-    [Tooltip("Rychlost přechodu do/ze skluzu.")]
     [SerializeField] private float _slideSmoothing = 8.0f;
 
-    private Vector3 _currentRotation;
+    private Vector3 _currentRotation; // X=Pitch, Y=Yaw, Z=Roll
     private float _currentYOffset;
     private Vector3 _initialLocalPosition;
 
     private void Start()
     {
+        // Najdeme controller v rodiči (Player)
         if (_controller == null)
             _controller = GetComponentInParent<PlayerController>();
             
-        // Uložíme si výchozí pozici modelu (obvykle 0,0,0 vůči rodiči)
+        // Uložíme si, kde má ModelPivot být (pravděpodobně 0,0,0)
         _initialLocalPosition = transform.localPosition;
     }
 
-    // DŮLEŽITÉ: LateUpdate se volá až PO Animátoru, takže se s ním nepereme
     private void LateUpdate()
     {
         if (_controller == null) return;
 
-        // 1. Logika rotace (stejná jako předtím)
+        // 1. Získáme rychlost hráče a převedeme ji do lokálního směru
+        // Díky tomu víme, co je "dopředu" a co "do boku", ať už koukáme kamkoliv
         Vector3 velocity = _controller.Velocity;
         Vector3 localVelocity = transform.parent.InverseTransformDirection(velocity);
 
-        float targetRoll = -localVelocity.x * _leanAmount;
-        float targetPitch = localVelocity.z * _runTiltAmount;
+        // 2. Vypočítáme cílové hodnoty
+        float targetRoll = -localVelocity.x * _leanAmount; // Náklon do zatáčky
+        float targetPitch = localVelocity.z * _runTiltAmount; // Náklon při běhu
         float targetYOffset = 0f;
         float currentSmoothing = _leanSmoothing;
 
-        // --- LOGIKA PRO SLIDE ---
-        if (_controller.IsSliding)
+        
+        if (_controller.IsSliding) // Pokud máš tuto proměnnou v Controlleru
         {
-            targetPitch = _slideBackAngle;
-            targetRoll *= 0.5f;
-            targetYOffset = _slideYOffset; // Cílíme na sníženou pozici
+            targetPitch = _slideBackAngle; // Záklon
+            targetYOffset = _slideYOffset; // Snížení
             currentSmoothing = _slideSmoothing;
         }
-        // ------------------------
+        
 
-        // 2. Vyhlazení Rotace
+        // 3. Vyhlazení (Lerp)
         _currentRotation.z = Mathf.Lerp(_currentRotation.z, targetRoll, Time.deltaTime * currentSmoothing);
         _currentRotation.x = Mathf.Lerp(_currentRotation.x, targetPitch, Time.deltaTime * currentSmoothing);
+        
+        // Y rotaci držíme striktně na 0 - TOTO JE KLÍČ K ODSTRANĚNÍ DRIFTU
+        _currentRotation.y = 0f; 
 
-        // 3. Vyhlazení Pozice (Y Offset)
         _currentYOffset = Mathf.Lerp(_currentYOffset, targetYOffset, Time.deltaTime * currentSmoothing);
 
-        // 4. APLIKACE (S opravou proti škubání)
-        
-        // ROTACE:
-        // Získáme aktuální Y rotaci, kterou tam dal Animátor/Rodič, a NECHÁME JI TAM.
-        // Měníme jen X (náklon) a Z (roll).
-        float currentAnimatorY = transform.localEulerAngles.y;
-        transform.localRotation = Quaternion.Euler(_currentRotation.x, currentAnimatorY, _currentRotation.z);
-
-        // POZICE:
-        // Aplikujeme snížení těžiště, aby zadek "tahal po zemi"
+        // 4. Aplikace
+        transform.localRotation = Quaternion.Euler(_currentRotation.x, 0f, _currentRotation.z);
         transform.localPosition = _initialLocalPosition + new Vector3(0, _currentYOffset, 0);
     }
 }

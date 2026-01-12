@@ -19,6 +19,13 @@ public class DoorInteractable : NetworkBehaviour, IInteractable
     [Tooltip("Rychlost otáčení (stupně za sekundu).")]
     [SerializeField] private float _rotationSpeed = 90f;
 
+    [Header("Lock Settings")]
+    [Tooltip("Pokud je zaškrtnuto, dveře začnou zamčená.")]
+    [SerializeField] private bool _startsLocked = false;
+    [SerializeField] private string _lockedPrompt = "E - Zamčeno";
+    [Tooltip("Index zvuku pro zamčeno v poli 'OneShotClips' na NetworkedAudioSource.")]
+    [SerializeField] private int _lockedSoundIndex = 3;
+
     [Header("Audio Settings")]
     [Tooltip("Index zvuku pro OTEVŘENÍ (vrzání/pohyb).")]
     [SerializeField] private int _openSoundIndex = 0;
@@ -35,6 +42,8 @@ public class DoorInteractable : NetworkBehaviour, IInteractable
 
     // --- State ---
     private NetworkVariable<bool> _isOpen = new NetworkVariable<bool>(false);
+    private NetworkVariable<bool> _isLocked = new NetworkVariable<bool>(false);
+
     private NetworkedAudioSource _networkedAudio;
     
     // Pro lokální plynulý pohyb
@@ -56,6 +65,7 @@ public class DoorInteractable : NetworkBehaviour, IInteractable
         if (IsServer)
         {
             _isOpen.Value = false;
+            _isLocked.Value = _startsLocked;
         }
         
         // Inicializace pozice podle aktuálního stavu při spawnu
@@ -88,24 +98,47 @@ public class DoorInteractable : NetworkBehaviour, IInteractable
 
     // --- IInteractable Implementation ---
 
-    public string InteractionPrompt => _isOpen.Value ? _promptClose : _promptOpen;
+    public string InteractionPrompt
+    {
+        get
+        {
+            if (_isLocked.Value) return _lockedPrompt;
+            return _isOpen.Value ? _promptClose : _promptOpen;
+        }
+    }
 
     public void Interact(NetworkObject interactor)
     {
         // Logika pouze na serveru
+        
+        // 1. Kontrola zamčení
+        if (_isLocked.Value)
+        {
+            _networkedAudio.PlayOneShotNetworked(_lockedSoundIndex);
+            return;
+        }
+
+        // 2. Otevření / Zavření
         if (_isOpen.Value)
         {
-            // ZAVÍRÁME
             CloseDoorLogic();
         }
         else
         {
-            // OTEVÍRÁME
             OpenDoorLogic();
         }
     }
 
     // --- Server Logic ---
+
+    // Veřejná metoda pro odemčení/zamčení (např. klíčem nebo pákou)
+    public void SetLocked(bool locked)
+    {
+        if (IsServer)
+        {
+            _isLocked.Value = locked;
+        }
+    }
 
     private void OpenDoorLogic()
     {
@@ -119,7 +152,6 @@ public class DoorInteractable : NetworkBehaviour, IInteractable
         _networkedAudio.PlayOneShotNetworked(_closeStartSoundIndex);
 
         // Spustíme Coroutine pro zvuk bouchnutí na konci
-        // Vypočítáme čas, jak dlouho to potrvá: čas = dráha / rychlost
         float travelDistance = Mathf.Abs(_openAngle - _closedAngle);
         float duration = travelDistance / _rotationSpeed;
 

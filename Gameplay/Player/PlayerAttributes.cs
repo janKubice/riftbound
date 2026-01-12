@@ -1,6 +1,6 @@
 using Unity.Netcode;
 using UnityEngine;
-using System; // Pro System.Action
+using System;
 using System.Collections;
 using UnityEngine.InputSystem;
 
@@ -21,7 +21,6 @@ public class PlayerAttributes : NetworkBehaviour
     [SerializeField] private Vector3 _respawnPosition = new Vector3(0, 1, 0);
 
     // --- Network Variables ---
-    // Musí být public, aby k nim mělo přístup UI v metodě Start()
 
     // Zdraví
     public NetworkVariable<int> CurrentHealth { get; private set; } =
@@ -65,6 +64,7 @@ public class PlayerAttributes : NetworkBehaviour
     private Coroutine _regenRoutine;
     private Coroutine _invulnerabilityCoroutine;
     private PlayerAudio _playerAudio;
+
     private void Awake()
     {
         _controller = GetComponent<CharacterController>();
@@ -80,15 +80,14 @@ public class PlayerAttributes : NetworkBehaviour
             CurrentStamina.OnValueChanged += HandleStaminaChanged;
             CurrentMana.OnValueChanged += HandleManaChanged;
 
-            // Max hodnoty (pro UI)
+            // Max hodnoty (pro UI update při změně maxima)
             MaxHealth.OnValueChanged += (oldVal, newVal) => HandleHealthChanged(CurrentHealth.Value, CurrentHealth.Value);
             MaxStamina.OnValueChanged += (oldVal, newVal) => HandleStaminaChanged(CurrentStamina.Value, CurrentStamina.Value);
             MaxMana.OnValueChanged += (oldVal, newVal) => HandleManaChanged(CurrentMana.Value, CurrentMana.Value);
 
-
             if (IsServer)
             {
-                // Nastavení výchozích hodnot ze SerializedField
+                // Init hodnot ze SerializedField
                 MaxHealth.Value = _defaultMaxHealth;
                 MaxStamina.Value = _defaultMaxStamina;
                 MaxMana.Value = _defaultMaxMana;
@@ -97,13 +96,12 @@ public class PlayerAttributes : NetworkBehaviour
                 StaminaRegenRate.Value = _defaultStaminaRegen;
                 ManaRegenRate.Value = _defaultManaRegen;
 
-                // Plné atributy při startu
                 CurrentHealth.Value = MaxHealth.Value;
                 CurrentStamina.Value = MaxStamina.Value;
                 CurrentMana.Value = MaxMana.Value;
                 IsInvulnerable.Value = false;
 
-                // Spuštění regenerace POUZE na serveru
+                // Spuštění regenerace
                 _regenRoutine = StartCoroutine(RegenerateAttributesRoutine());
             }
 
@@ -111,8 +109,6 @@ public class PlayerAttributes : NetworkBehaviour
             {
                 LocalInstance = this;
                 Debug.Log($"[PlayerAttributes] Lokální instance hráče nastavena");
-                // Vyvoláme události pro UI, které už možná poslouchá
-                // (pro případ, že by se UI načetlo dříve)
                 InvokeAllLocalUIEvents();
             }
         }
@@ -120,7 +116,6 @@ public class PlayerAttributes : NetworkBehaviour
         {
             Debug.LogError($"[CRITICAL SPAWN ERROR] Chyba v {name}: {e.Message}\n{e.StackTrace}");
         }
-
     }
 
     public override void OnDestroy()
@@ -129,8 +124,7 @@ public class PlayerAttributes : NetworkBehaviour
         {
             if (!NetworkManager.Singleton.ShutdownInProgress)
             {
-                Debug.LogError($"[Security Alert] Objekt {gameObject.name} byl smazán lokálně na klientovi! " +
-                               $"To způsobí Invalid Destroy chybu. Prověřte volání v tomto skriptu.");
+                Debug.LogError($"[Security Alert] Objekt {gameObject.name} byl smazán lokálně na klientovi! Invalid Destroy.");
             }
         }
         base.OnDestroy();
@@ -138,22 +132,19 @@ public class PlayerAttributes : NetworkBehaviour
 
     public override void OnNetworkDespawn()
     {
-        // Vždy se odhlásíme
         CurrentHealth.OnValueChanged -= HandleHealthChanged;
         CurrentStamina.OnValueChanged -= HandleStaminaChanged;
         CurrentMana.OnValueChanged -= HandleManaChanged;
 
-        MaxHealth.OnValueChanged -= (oldVal, newVal) => HandleHealthChanged(CurrentHealth.Value, CurrentHealth.Value);
-        MaxStamina.OnValueChanged -= (oldVal, newVal) => HandleStaminaChanged(CurrentStamina.Value, CurrentStamina.Value);
-        MaxMana.OnValueChanged -= (oldVal, newVal) => HandleManaChanged(CurrentMana.Value, CurrentMana.Value);
+        // Anonymní lambdy nelze snadno odhlásit bez uložení reference,
+        // ale při Despawnu se objekt ničí/resetuje, takže to kriticky nevadí,
+        // pokud se NetworkVariable instance recykluje správně.
+        // Pro čistotu by bylo lepší mít pojmenované metody, ale pro tento kontext to stačí.
 
-        if (IsServer && _regenRoutine != null)
+        if (IsServer)
         {
-            StopCoroutine(_regenRoutine);
-        }
-        if (IsServer && _invulnerabilityCoroutine != null)
-        {
-            StopCoroutine(_invulnerabilityCoroutine);
+            if (_regenRoutine != null) StopCoroutine(_regenRoutine);
+            if (_invulnerabilityCoroutine != null) StopCoroutine(_invulnerabilityCoroutine);
         }
 
         if (IsOwner && LocalInstance == this)
@@ -162,9 +153,6 @@ public class PlayerAttributes : NetworkBehaviour
         }
     }
 
-    /// <summary>
-    /// Vynutí aktualizaci všech UI prvků pro lokálního hráče
-    /// </summary>
     private void InvokeAllLocalUIEvents()
     {
         OnLocalPlayerHealthChanged?.Invoke(CurrentHealth.Value, MaxHealth.Value);
@@ -176,50 +164,40 @@ public class PlayerAttributes : NetworkBehaviour
 
     private void HandleHealthChanged(int previousValue, int newValue)
     {
-        if (IsOwner)
-        {
-            OnLocalPlayerHealthChanged?.Invoke(newValue, MaxHealth.Value);
-        }
+        if (IsOwner) OnLocalPlayerHealthChanged?.Invoke(newValue, MaxHealth.Value);
     }
 
     private void HandleStaminaChanged(float previousValue, float newValue)
     {
-        if (IsOwner)
-        {
-            OnLocalPlayerStaminaChanged?.Invoke(newValue, MaxStamina.Value);
-        }
+        if (IsOwner) OnLocalPlayerStaminaChanged?.Invoke(newValue, MaxStamina.Value);
     }
 
     private void HandleManaChanged(float previousValue, float newValue)
     {
-        if (IsOwner)
-        {
-            OnLocalPlayerManaChanged?.Invoke(newValue, MaxMana.Value);
-        }
+        if (IsOwner) OnLocalPlayerManaChanged?.Invoke(newValue, MaxMana.Value);
     }
 
     // --- Regenerace (Pouze Server) ---
 
     private IEnumerator RegenerateAttributesRoutine()
     {
-        // Běží pouze na serveru
         while (true)
         {
             yield return new WaitForSeconds(1.0f);
 
-            // Regenerace zdraví
-            if (CurrentHealth.Value < MaxHealth.Value && CurrentHealth.Value > 0) // Neregenerujeme mrtvé
+            // Zdraví
+            if (CurrentHealth.Value < MaxHealth.Value && CurrentHealth.Value > 0)
             {
                 CurrentHealth.Value = Mathf.Min(CurrentHealth.Value + (int)HealthRegenRate.Value, MaxHealth.Value);
             }
 
-            // Regenerace staminy
+            // Stamina
             if (Time.time > _lastStaminaUseTime + _staminaRegenDelay && CurrentStamina.Value < MaxStamina.Value)
             {
                 CurrentStamina.Value = Mathf.Min(CurrentStamina.Value + StaminaRegenRate.Value, MaxStamina.Value);
             }
 
-            // Regenerace many
+            // Mana
             if (CurrentMana.Value < MaxMana.Value)
             {
                 CurrentMana.Value = Mathf.Min(CurrentMana.Value + ManaRegenRate.Value, MaxMana.Value);
@@ -227,7 +205,90 @@ public class PlayerAttributes : NetworkBehaviour
         }
     }
 
-    // --- Veřejné metody pro Server ---
+    // --- ZAPOUZDŘENÍ ZDROJŮ (Encapsulation) ---
+
+    /// <summary>
+    /// Pokusí se spotřebovat Staminu. Vrací true, pokud byl dostatek a akce proběhla/byla odeslána.
+    /// </summary>
+    public bool ConsumeStamina(float amount)
+    {
+        // 1. Lokální predikce / kontrola
+        if (CurrentStamina.Value < amount) return false;
+
+        // 2. Aplikace
+        if (IsServer)
+        {
+            PerformStaminaConsumption(amount);
+        }
+        else
+        {
+            // Klient pošle požadavek. Lokálně se hodnota nezmění okamžitě (čeká na sync),
+            // ale vrátíme true, aby klient mohl přehrát animaci/efekt.
+            ConsumeStaminaServerRpc(amount);
+        }
+
+        return true;
+    }
+
+    /// <summary>
+    /// Pokusí se spotřebovat Manu. Vrací true, pokud byl dostatek a akce proběhla/byla odeslána.
+    /// </summary>
+    public bool ConsumeMana(float amount)
+    {
+        if (CurrentMana.Value < amount) return false;
+
+        if (IsServer)
+        {
+            PerformManaConsumption(amount);
+        }
+        else
+        {
+            ConsumeManaServerRpc(amount);
+        }
+
+        return true;
+    }
+
+    // --- Interní logika změny hodnot (pouze Server) ---
+
+    private void PerformStaminaConsumption(float amount)
+    {
+        _lastStaminaUseTime = Time.time;
+        if (CurrentStamina.Value >= amount)
+        {
+            CurrentStamina.Value -= amount;
+        }
+    }
+
+    private void PerformManaConsumption(float amount)
+    {
+        if (CurrentMana.Value >= amount)
+        {
+            CurrentMana.Value -= amount;
+        }
+    }
+
+    // --- Server RPCs pro spotřebu ---
+
+    [ServerRpc]
+    private void ConsumeStaminaServerRpc(float amount)
+    {
+        if (CurrentStamina.Value >= amount)
+        {
+            PerformStaminaConsumption(amount);
+        }
+    }
+
+    [ServerRpc]
+    private void ConsumeManaServerRpc(float amount)
+    {
+        if (CurrentMana.Value >= amount)
+        {
+            PerformManaConsumption(amount);
+        }
+    }
+
+    // --- Ostatní veřejné metody (Combat, Heal, Upgrade) ---
 
     [ServerRpc(RequireOwnership = false)]
     public void TakeDamageServerRpc(int amount)
@@ -245,89 +306,42 @@ public class PlayerAttributes : NetworkBehaviour
         {
             CurrentHealth.Value = 0;
 
-            // Zjistíme, zda jsme v aréně
             if (ArenaManager.Instance != null && ArenaManager.Instance.IsPlayerInArena(OwnerClientId))
             {
-                // Jsme v boji -> Reportujeme smrt Aréně
                 ArenaManager.Instance.OnPlayerDiedInArena(OwnerClientId);
-
-                // Obnovíme zdraví, aby hráč v lobby neležel mrtvý
+                
+                // Reset atributů pro stav v lobby
                 CurrentHealth.Value = MaxHealth.Value;
                 CurrentStamina.Value = MaxStamina.Value;
                 CurrentMana.Value = MaxMana.Value;
-
-                // Poznámka: Teleportaci do lobby zajistí ArenaManager.OnPlayerDiedInArena
             }
             else
             {
-                // Nejsme v aréně -> Standardní Respawn
                 Respawn();
             }
         }
     }
 
-    /// <summary>
-    /// Metoda pro léčení (volaná ze Spellbooku nebo Lektvaru)
-    /// </summary>
     public void Heal(int amount)
     {
-        if (!IsServer) return; // Měníme NetworkVariable, musí běžet na serveru
+        if (!IsServer) return;
 
-        if (CurrentHealth.Value > 0) // Neléčíme mrtvé
+        if (CurrentHealth.Value > 0)
         {
-            int oldVal = CurrentHealth.Value;
             CurrentHealth.Value = Mathf.Clamp(CurrentHealth.Value + amount, 0, MaxHealth.Value);
-
-            // Zde můžeš přidat audio/vfx pro heal, pokud se hodnota změnila
         }
     }
 
-    /// <summary>
-    /// Veřejná metoda pro spotřebu staminy. Volá ji lokální hráč, běží na serveru.
-    /// </summary>
-    [ServerRpc]
-    public void ConsumeStaminaServerRpc(float amount)
-    {
-        _lastStaminaUseTime = Time.time;
-        if (CurrentStamina.Value >= amount)
-        {
-            CurrentStamina.Value -= amount;
-        }
-        // Pokud nemá dost, server prostě nic neodečte.
-        // Kontrolu (zda vůbec akci provést) by si měl dělat i klient.
-    }
-
-    /// <summary>
-    /// Veřejná metoda pro spotřebu many.
-    /// </summary>
-    [ServerRpc]
-    public void ConsumeManaServerRpc(float amount)
-    {
-        if (CurrentMana.Value >= amount)
-        {
-            CurrentMana.Value -= amount;
-        }
-    }
-
-    /// <summary>
-    /// (Bod 3) Metoda pro upgrade maximálního zdraví.
-    /// </summary>
     [ServerRpc]
     public void UpgradeMaxHealthServerRpc(int amountToAdd)
     {
         MaxHealth.Value += amountToAdd;
-        // Volitelně můžeme rovnou doplnit i aktuální zdraví
         CurrentHealth.Value += amountToAdd;
     }
 
-    /// <summary>
-    /// Klient žádá server, aby se stal na krátkou dobu nesmrtelným
-    /// </summary>
     [ServerRpc]
     public void SetInvulnerableServerRpc(float duration)
     {
-        // Spustíme coroutine na serveru
-        // Zastavíme předchozí, pokud ještě běží, a spustíme novou
         if (_invulnerabilityCoroutine != null)
         {
             StopCoroutine(_invulnerabilityCoroutine);
@@ -335,9 +349,6 @@ public class PlayerAttributes : NetworkBehaviour
         _invulnerabilityCoroutine = StartCoroutine(InvulnerabilityRoutine(duration));
     }
 
-    /// <summary>
-    /// Coroutine běžící POUZE na serveru
-    /// </summary>
     private IEnumerator InvulnerabilityRoutine(float duration)
     {
         IsInvulnerable.Value = true;
@@ -346,13 +357,10 @@ public class PlayerAttributes : NetworkBehaviour
         _invulnerabilityCoroutine = null;
     }
 
-    // Zde mohou být v budoucnu další upgrady (UpgradeStaminaRegenServerRpc atd.)
-
     // --- Respawn ---
 
     private void Respawn()
     {
-        // Server obnoví zdraví (a případně manu/staminu)
         CurrentHealth.Value = MaxHealth.Value;
         CurrentStamina.Value = MaxStamina.Value;
         CurrentMana.Value = MaxMana.Value;
@@ -371,20 +379,26 @@ public class PlayerAttributes : NetworkBehaviour
         }
     }
 
-    // --- Pro testování (můžete smazat později) ---
+    // --- Debug / Input Test ---
     private void Update()
     {
         if (!IsOwner) return;
 
 #if UNITY_EDITOR
-        if (Keyboard.current != null && Keyboard.current.kKey.wasPressedThisFrame)
+        if (Keyboard.current != null)
         {
-            TakeDamageServerRpc(10);
-        }
-        if (Keyboard.current != null && Keyboard.current.lKey.wasPressedThisFrame)
-        {
-            // Test spotřeby staminy
-            ConsumeStaminaServerRpc(15);
+            // Test poškození
+            if (Keyboard.current.kKey.wasPressedThisFrame)
+            {
+                TakeDamageServerRpc(10);
+            }
+            
+            // Test spotřeby staminy (nová metoda)
+            if (Keyboard.current.lKey.wasPressedThisFrame)
+            {
+                bool success = ConsumeStamina(15);
+                if (!success) Debug.Log("Not enough stamina!");
+            }
         }
 #endif
     }

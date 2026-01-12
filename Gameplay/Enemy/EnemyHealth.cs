@@ -6,10 +6,10 @@ using System;
 public class EnemyHealth : NetworkBehaviour
 {
     [SerializeField] private int _maxHealth = 30;
-    
+    private StatusEffectReceiver _statusReceiver;
     public NetworkVariable<int> CurrentHealth = new NetworkVariable<int>(30);
     private Rigidbody _rb;
-    
+
     // Flag pro nesmrtelnost (Spawn fáze)
     public bool IsInvulnerable { get; set; } = false;
 
@@ -20,6 +20,7 @@ public class EnemyHealth : NetworkBehaviour
     private void Awake()
     {
         _rb = GetComponent<Rigidbody>();
+        _statusReceiver = GetComponent<StatusEffectReceiver>();
     }
 
     public override void OnNetworkSpawn()
@@ -47,7 +48,7 @@ public class EnemyHealth : NetworkBehaviour
     {
         // Nezničíme objekt hned, ale řekneme Controlleru "Jsem mrtvý"
         OnDeath?.Invoke();
-        
+
         // Vypneme kolize a fyziku, aby do něj hráči nekopali během animace
         if (_rb != null) _rb.isKinematic = true;
         var col = GetComponent<Collider>();
@@ -60,23 +61,14 @@ public class EnemyHealth : NetworkBehaviour
         _rb.AddForce(force, ForceMode.Impulse);
     }
 
-    public void ApplyStatusEffect(StatusEffectData effect)
+    public void ApplyStatusEffect(StatusEffectData effectData)
     {
-        if (!IsServer || IsInvulnerable) return;
-        if (effect.Type == StatusEffectType.Burn) StartCoroutine(BurnRoutine(effect));
+        if (!IsServer || IsInvulnerable || _statusReceiver == null) return;
+
+        // Receiver se postará o coroutiny, vizuály i damage ticky
+        _statusReceiver.ApplyStatusEffect(effectData);
     }
 
-    private IEnumerator BurnRoutine(StatusEffectData effect)
-    {
-        float timer = 0;
-        while (timer < effect.Duration && CurrentHealth.Value > 0)
-        {
-            yield return new WaitForSeconds(1.0f);
-            TakeDamage((int)effect.Potency);
-            timer += 1.0f;
-        }
-    }
-    
     // Tuto metodu zavolá AI Controller až skončí animace smrti
     public void DestroySelf()
     {

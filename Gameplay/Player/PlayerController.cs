@@ -3,6 +3,8 @@ using UnityEngine.InputSystem;
 using Unity.Netcode;
 using Unity.Cinemachine;
 using System.Collections;
+
+[RequireComponent(typeof(StatusEffectReceiver))]
 [RequireComponent(typeof(CharacterController))]
 public class PlayerController : NetworkBehaviour
 {
@@ -31,7 +33,6 @@ public class PlayerController : NetworkBehaviour
     private float _jumpBufferDuration = 0.2f;
     private bool _wasGroundedLastFrame = true;
     [Header("Double Jump")]
-    [SerializeField] private int _maxJumps = 2;
     private int _currentJumpCount;
 
     [Header("Úhyb (Dodge)")]
@@ -79,6 +80,7 @@ public class PlayerController : NetworkBehaviour
     [SerializeField] private PlayerVFX _playerVFX;
     private CinemachineImpulseSource _impulseSource;
     private CinemachineCamera _virtualCamera;
+    private StatusEffectReceiver _statusReceiver;
 
     [Header("Emotes")]
     [SerializeField] private PlayerEmotes _playerEmotes;
@@ -86,6 +88,7 @@ public class PlayerController : NetworkBehaviour
     // --- Odkazy na komponenty ---
     // Odkaz na PlayerAttributes pro kontrolu staminy
     private PlayerAttributes _attributes;
+    private PlayerProgression _progression;
     private bool _isFireInputHeld = false;
 
     // Vstupy
@@ -115,16 +118,11 @@ public class PlayerController : NetworkBehaviour
     private bool _lastSentGrounded = true;
     private void Awake()
     {
-        if (_controller == null)
-            _controller = GetComponent<CharacterController>();
-        if (_playerInput == null)
-            _playerInput = GetComponent<PlayerInput>();
-        if (_animator == null)
-            _animator = GetComponent<Animator>();
-
+        if (_controller == null) _controller = GetComponent<CharacterController>();
+        if (_playerInput == null) _playerInput = GetComponent<PlayerInput>();
+        if (_animator == null) _animator = GetComponent<Animator>();
         if (_playerEmotes == null) _playerEmotes = GetComponent<PlayerEmotes>();
 
-        // NOVÉ: Získáme odkaz na atributy
         _attributes = GetComponent<PlayerAttributes>();
 
         _forwardSpeedHash = Animator.StringToHash("ForwardSpeed");
@@ -141,6 +139,7 @@ public class PlayerController : NetworkBehaviour
         _playerAudio = GetComponent<PlayerAudio>();
         _playerVFX = GetComponent<PlayerVFX>();
         _impulseSource = GetComponent<CinemachineImpulseSource>();
+        _statusReceiver = GetComponent<StatusEffectReceiver>();
 
         _originalHeight = _controller.height;
         _originalCenter = _controller.center;
@@ -207,40 +206,27 @@ public class PlayerController : NetworkBehaviour
         if (_attributes == null) _attributes = PlayerAttributes.LocalInstance;
         if (_attributes == null) return;
 
-        // Máme dost staminy?
-        if (_attributes.CurrentStamina.Value >= _dodgeStaminaCost)
+        if (_attributes.ConsumeStamina(_dodgeStaminaCost))
         {
-            // 1. Určíme směr úhybu
+            // 1. Logika směru
             Vector2 dodgeInput = _moveInput;
-            if (dodgeInput.magnitude < 0.1f)
-            {
-                // Pokud stojíme (žádný vstup WASD), uskočíme dozadu
-                dodgeInput = new Vector2(0, -1);
-            }
-
-            // Převedeme lokální směr vstupu (WASD) na světový směr
+            if (dodgeInput.magnitude < 0.1f) dodgeInput = new Vector2(0, -1);
             Vector3 dodgeDirection = transform.TransformDirection(new Vector3(dodgeInput.x, 0, dodgeInput.y)).normalized;
 
-            // 2. Spotřebujeme staminu (pošleme na server)
-            _attributes.ConsumeStaminaServerRpc(_dodgeStaminaCost);
-
-            // 3. Aktivujeme nesmrtelnost (pošleme na server)
+            // 2. Nesmrtelnost (stále separátní volání, to je v pořádku)
             _attributes.SetInvulnerableServerRpc(_dodgeInvulnerabilityTime);
 
-            // 4. Spustíme animaci (Server -> Všichni klienti)
-            TriggerDodgeAnimation(dodgeInput.normalized); // Lokální pomocná metoda
+            // 3. Animace
+            TriggerDodgeAnimation(dodgeInput.normalized);
 
-            // 5. Spustíme pohyb (Pouze lokálně)
+            // 4. Pohyb
             StartCoroutine(DodgeRoutine(dodgeDirection));
 
-            if (IsOwner && _playerAudio != null)
+            // 5. Efekty
+            if (IsOwner)
             {
-                _playerAudio.RequestPlaySoundServerRpc(PlayerAudio.AUDIO_DODGE);
-            }
-
-            if (IsOwner && _impulseSource != null)
-            {
-                _impulseSource.GenerateImpulse();
+                if (_playerAudio != null) _playerAudio.RequestPlaySoundServerRpc(PlayerAudio.AUDIO_DODGE);
+                if (_impulseSource != null) _impulseSource.GenerateImpulse();
             }
         }
         else if (IsOwner && _playerAudio != null)
@@ -257,11 +243,19 @@ public class PlayerController : NetworkBehaviour
     {
         if (!IsOwner) return;
 
+        // 1. KONTROLA STUNU (Hard CC)
+        // Pokud jsme omráčení, nesmíme nic dělat
+        if (_statusReceiver != null && _statusReceiver.IsStunned)
+        {
+            // Můžeme případně vypnout animátor parametry pro pohyb
+            _moveInput = Vector2.zero;
+            HandleAnimation(); // Aby se přehrála Idle animace
+            HandleGravity();
+            return; // Ukončíme Update před pohybem a střelbou
+        }
+
         CheckGrounded();
 
-        // --- Logika pro Dodge (Úhyb) ---
-        // Protože Dodge běží v Coroutine, která má vlastní volání Move(),
-        // musíme během úhybu stále aplikovat gravitaci odděleně.
         if (_isDodging)
         {
             HandleGravity(); // Spočítá _playerVelocity.y
@@ -402,8 +396,11 @@ public class PlayerController : NetworkBehaviour
             effects.Initialize(_animator);
         }
 
-        Cursor.lockState = CursorLockMode.Locked;
-        Cursor.visible = false;
+        if (!StatusEffectDebugger.IsMenuOpen)
+        {
+            Cursor.lockState = CursorLockMode.Locked;
+            Cursor.visible = false;
+        }
     }
 
     private void HandleGravity()
@@ -419,6 +416,46 @@ public class PlayerController : NetworkBehaviour
     }
 
     /// <summary>
+    /// Vystřelí hráče vertikálně nahoru danou silou.
+    /// </summary>
+    /// <param name="force">Síla výstřelu (např. 15f)</param>
+    public void ApplyVerticalImpulse(float force)
+    {
+        if (!IsOwner) return; // Fyziku počítá jen vlastník
+
+        // 1. Nastavíme rychlost směrem nahoru
+        _playerVelocity.y = force;
+
+        // 2. DŮLEŽITÉ: Okamžitě řekneme controlleru, že nejsme na zemi.
+        // Jinak by HandleGravity() v příštím framu resetovalo rychlost na -5f.
+        _isGrounded = false;
+        _lastGroundedTime = 0f; // Vynulujeme coyote time
+        _wasGroundedLastFrame = false;
+
+        // 3. Resetujeme animaci, aby to vypadalo jako skok/pád
+        if (_animator != null)
+        {
+            _animator.SetBool(_isGroundedHash, false);
+        }
+    }
+
+    private void OnControllerColliderHit(ControllerColliderHit hit)
+    {
+        // Optimalizace: Neřešit kolize s podlahou, jen s objekty do stran
+        if (hit.moveDirection.y < -0.3f) return;
+
+        // Zkusíme najít DestructibleProp na objektu, do kterého jsme narazili
+        if (hit.gameObject.TryGetComponent<DestructibleProp>(out var prop))
+        {
+            // Získáme aktuální rychlost hráče (magnitude vektoru velocity z CharacterControlleru)
+            float impactForce = _controller.velocity.magnitude;
+
+            // Pošleme informaci bedně
+            prop.CheckImpact(impactForce);
+        }
+    }
+
+    /// <summary>
     /// UPRAVENO: Používá aktuální rychlost (včetně sprintu)
     /// </summary>
     private Vector3 GetHorizontalMovement()
@@ -431,6 +468,18 @@ public class PlayerController : NetworkBehaviour
         {
             currentSpeed *= _airControlFactor;
         }
+
+        if (_statusReceiver != null)
+        {
+            // Tady se aplikuje ten "Slow" nebo "Haste"
+            currentSpeed *= _statusReceiver.CurrentSpeedMultiplier;
+        }
+
+        // 2. Progression (Trvalé vylepšení rychlosti)
+        // Zde přičítáme procenta (např. baseSpeed * 1.2) nebo flat hodnotu (baseSpeed + 2).
+        // Dle StatType.MoveSpeed implementace v GetStatMultiplier (1.0 + bonus).
+        if (_progression != null)
+            currentSpeed *= _progression.GetStatMultiplier(StatType.MoveSpeed);
 
         return moveDirection * currentSpeed * Time.deltaTime;
     }
@@ -455,12 +504,10 @@ public class PlayerController : NetworkBehaviour
             }
 
             // Máme dostatek staminy A hýbeme se dopředu?
-            if (_attributes.CurrentStamina.Value > 0 && isMovingForward)
+            if (isMovingForward && _attributes.ConsumeStamina(_sprintStaminaCost * Time.deltaTime))
             {
-                // Ano, můžeme sprintovat
+                // Úspěch - sprintujeme
                 _isSprinting = true;
-                // Pošleme na server požadavek na spotřebu staminy
-                _attributes.ConsumeStaminaServerRpc(_sprintStaminaCost * Time.deltaTime);
             }
             else
             {
@@ -492,39 +539,39 @@ public class PlayerController : NetworkBehaviour
 
     private void HandleJump()
     {
+        int maxJumps = 1;
+        if (_progression != null)
+            maxJumps += (int)_progression.GetStatBonus(StatType.JumpCount);
+
         // Zkontrolujeme, zda byl skok stisknut nedávno
         bool jumpInputBuffered = Time.time < _lastJumpInputTime + _jumpBufferDuration;
 
         // Musíme být na zemi A mít "nabufferovaný" vstup
-        if (jumpInputBuffered && (_isGrounded || _currentJumpCount < _maxJumps))
+        if (jumpInputBuffered && (_isGrounded || _currentJumpCount < maxJumps))
         {
             // --- Zde je "Provedení logiky skoku..." ---
             if (_attributes == null) _attributes = PlayerAttributes.LocalInstance;
             if (_attributes == null) return;
 
             // Ověříme staminu
-            if (_attributes.CurrentStamina.Value >= _jumpStaminaCost)
+            if (_attributes.ConsumeStamina(_jumpStaminaCost))
             {
                 _currentJumpCount++;
 
-                // 1. Spotřebujeme staminu (pošleme na server)
-                _attributes.ConsumeStaminaServerRpc(_jumpStaminaCost);
-
-                // 2. Aplikujeme vertikální sílu (zpracuje HandleGravity)
                 _playerVelocity.y = Mathf.Sqrt(_jumpHeight * -2f * _gravityValue);
 
-                // 3. Spustíme animaci (pošleme přes server všem)
+                // Spustíme animaci (pošleme přes server všem)
                 TriggerAnimationServerRpc(_jumpTriggerHash);
                 GetComponentInChildren<PlayerSquashStretch>()?.TriggerJumpSquash();
-                
+
                 if (_currentJumpCount > 1) _playerVelocity.y = Mathf.Sqrt(_jumpHeight * -2f * _gravityValue); // Můžeš dát menší výšku pro druhý skok
-                
+
                 if (IsOwner && _playerAudio != null)
                 {
                     _playerAudio.RequestPlaySoundServerRpc(PlayerAudio.AUDIO_JUMP);
                 }
 
-                // 4. ZNEPLATNÍME BUFFERY
+                // ZNEPLATNÍME BUFFERY
                 _lastJumpInputTime = 0f; // Vynulování bufferu skoku
                 _lastGroundedTime = 0f; // Vynulujeme Coyote time, abychom nemohli hned uskočit/skočit znovu
                 _isGrounded = false; // Vynutíme stav ve vzduchu

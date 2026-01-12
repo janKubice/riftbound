@@ -16,20 +16,20 @@ public class MeleeAttackLogic : AttackLogic
         // Posuneme střed mírně dopředu a nahoru, aby to lépe odpovídalo vizuálu
         Vector3 origin = attacker.transform.position + Vector3.up * 1.0f;
         Vector3 forward = attacker.transform.forward;
-        
+
         // Použijeme Range ze statů (vylepšitelné)
         float range = stats.Range > 0 ? stats.Range : 2.0f;
 
         // 2. Detekce kolizí (NonAlloc pro výkon)
         int hitCount = Physics.OverlapSphereNonAlloc(origin, range, _hitBuffer);
-        
+
         bool hitSomething = false;
 
         // 3. Procházení zasažených objektů
         for (int i = 0; i < hitCount; i++)
         {
             Collider hit = _hitBuffer[i];
-            
+
             // Ignorujeme sami sebe
             if (hit.gameObject == attacker.gameObject) continue;
             // Ignorujeme Triggery (např. loot na zemi)
@@ -53,7 +53,7 @@ public class MeleeAttackLogic : AttackLogic
                 {
                     // Aplikace Damage
                     enemy.TakeDamage(finalDamage);
-                    
+
                     // Aplikace Knockbacku (Odhození)
                     if (stats.Knockback > 0)
                     {
@@ -63,12 +63,6 @@ public class MeleeAttackLogic : AttackLogic
                         enemy.ApplyKnockback(knockDir.normalized * stats.Knockback);
                     }
 
-                    // Aplikace Status Efektu (pokud nějaký zbraň má)
-                    if (stats.Effect.Type != StatusEffectType.None)
-                    {
-                        enemy.ApplyStatusEffect(stats.Effect);
-                    }
-
                     entityHit = true;
                 }
                 // B) Zásah Hráče (PvP)
@@ -76,6 +70,21 @@ public class MeleeAttackLogic : AttackLogic
                 {
                     player.TakeDamageServerRpc(finalDamage);
                     entityHit = true;
+                }
+
+                if (hit.TryGetComponent(out StatusEffectReceiver receiver))
+                {
+                    // Aplikujeme efekt definovaný ve zbrani
+                    if (stats.Effect != null && stats.Effect.Type != StatusEffectType.None)
+                    {
+                        receiver.ApplyStatusEffect(stats.Effect);
+                    }
+                }
+
+                if (hit.TryGetComponent(out DestructibleProp prop))
+                {
+                    prop.TakeHit();
+                    // Můžeš přidat hitSound / impact effect
                 }
 
                 // C) Spawn Hit VFX
@@ -99,7 +108,7 @@ public class MeleeAttackLogic : AttackLogic
         // Zvuk zásahu (pokud jsme něco trefili)
         if (hitSomething && attacker.TryGetComponent(out PlayerAudio audio))
         {
-             audio.RequestPlaySoundServerRpc(PlayerAudio.AUDIO_HIT_DEALT);
+            audio.RequestPlaySoundServerRpc(PlayerAudio.AUDIO_HIT_DEALT);
         }
     }
 }

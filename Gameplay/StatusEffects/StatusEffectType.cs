@@ -5,5 +5,6 @@ public enum StatusEffectType
     Slow,   // Snížení rychlosti
     Stun,   // Zastavení
     Freeze, // Zastavení + křehkost
-    Weakness // Snížení damage nepřítele
+    Weakness, // Snížení damage nepřítele
+    Buff
 }
