@@ -2,7 +2,8 @@ using UnityEngine;
 using UnityEngine.UI; // Nutné pro Slider
 using TMPro;
 using System.Collections;
-using Unity.Netcode; // Pokud používáte TextMeshPro
+using Unity.Netcode;
+using Unity.VisualScripting; // Pokud používáte TextMeshPro
 
 public class PlayerHUD : MonoBehaviour
 {
@@ -28,6 +29,10 @@ public class PlayerHUD : MonoBehaviour
     [SerializeField] private float _locationFadeTime = 1.0f;
     [SerializeField] private float _locationHoldTime = 3.0f;
     private Coroutine _locationCoroutine;
+
+    [Header("Time")]
+    [SerializeField] private TMPro.TextMeshProUGUI _clockText;
+    [SerializeField] private DayNightCycle dayNightCycle;
 
     private void Awake()
     {
@@ -70,7 +75,7 @@ public class PlayerHUD : MonoBehaviour
 
     private void Start()
     {
-         _playerHudPanel.SetActive(true);
+        _playerHudPanel.SetActive(true);
         if (_locationNameText != null)
         {
             _locationNameText.gameObject.SetActive(false);
@@ -87,6 +92,14 @@ public class PlayerHUD : MonoBehaviour
         {
             // ... a spustíme "hlídacího psa", který čeká na spawn
             StartCoroutine(WaitForLocalPlayer());
+        }
+    }
+
+    void Update()
+    {
+        if (_clockText != null) // Udělej si singleton z DayNightCycle nebo najdi referenci
+        {
+            _clockText.text = dayNightCycle.GetFormattedTime();
         }
     }
 

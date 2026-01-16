@@ -226,6 +226,19 @@ public class WeaponManager : NetworkBehaviour
         {
             Instantiate(_currentWeaponData.HitVFXPrefab, position, Quaternion.identity);
         }
+
+        Collider[] enviroHits = Physics.OverlapSphere(position, 2.0f); // Radius 2 metry
+        
+        foreach (var hit in enviroHits)
+        {
+            // Hledáme náš nový skript na stromech
+            if (hit.TryGetComponent(out InteractiveFoliage foliage))
+            {
+                // Vypočítáme směr od hráče ke stromu
+                Vector3 dir = (hit.transform.position - transform.position).normalized;
+                foliage.OnHit(dir);
+            }
+        }
     }
 
     /// <summary>

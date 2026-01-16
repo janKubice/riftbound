@@ -95,6 +95,16 @@ public class MeleeAttackLogic : AttackLogic
                     Vector3 hitPos = hit.ClosestPoint(origin);
                     weaponManager.SpawnMeleeImpact(hitPos);
                 }
+
+                if (!entityHit && !hit.isTrigger)
+                {
+                    // Označíme, že jsme trefili "něco" pevného -> spustí se VFX
+                    hitSomething = true;
+
+                    // Pro stromy to zavolá SpawnMeleeImpact, který (díky úpravě výše) zatřese stromem
+                    Vector3 hitPos = hit.ClosestPoint(origin);
+                    weaponManager.SpawnMeleeImpact(hitPos);
+                }
             }
         }
 
