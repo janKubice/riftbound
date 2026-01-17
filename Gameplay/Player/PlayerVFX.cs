@@ -8,15 +8,11 @@ public class PlayerVFX : NetworkBehaviour
 {
     [Header("Invulnerability (Nesmrtelnost)")]
     [Tooltip("Všechny renderery postavy, u kterých změníme materiály.")]
-    [SerializeField] private SkinnedMeshRenderer[] _playerRenderers; // ZMĚNA: Pole rendererů
-
-    // [SerializeField] private Material _normalMaterial; // ZMĚNA: Už není potřeba, materiály si uložíme
+    [SerializeField] private SkinnedMeshRenderer[] _playerRenderers;
 
     [Tooltip("Materiál, který se použije během nesmrtelnosti (nahradí VŠECHNY materiály na rendererech).")]
     [SerializeField] private Material _invulnerableMaterial;
 
-    // ZMĚNA: Slovník pro uložení původních materiálů pro každý renderer
-    // Klíč (Key) = Renderer, Hodnota (Value) = Pole jeho původních materiálů
     private Dictionary<SkinnedMeshRenderer, Material[]> _originalMaterials = new Dictionary<SkinnedMeshRenderer, Material[]>();
 
 
@@ -30,6 +26,17 @@ public class PlayerVFX : NetworkBehaviour
     [Tooltip("Částicový systém, který hraje při sprintu (musí být na hráči a nastaven na 'Looping').")]
     [SerializeField] private ParticleSystem _sprintParticles;
 
+    [Header("Shop / Levitation FX")]
+    [Tooltip("Efekt na těle hráče (Shine) - hýbe se s hráčem.")]
+    [SerializeField] private GameObject _bodyLevitationVFX;
+
+    [Tooltip("Efekt na zemi (Kruh/Pilíř) - zůstává přilepený k zemi.")]
+    [SerializeField] private GameObject _groundLevitationVFX;
+
+    [Tooltip("Vrstvy, které považujeme za zem (aby se kruh nechyta hráče).")]
+    [SerializeField] private LayerMask _groundLayerMask = 1; // Defaultně "Default"
+    // ----------------------------------
+
     [Header("Required Components (Komponenty)")]
     [Tooltip("Odkaz na PlayerAttributes pro čtení IsInvulnerable.")]
     [SerializeField] private PlayerAttributes _attributes;
@@ -41,6 +48,7 @@ public class PlayerVFX : NetworkBehaviour
     [SerializeField] private Material _damageMaterial;
     [SerializeField] private float _damageFlashDuration = 0.15f;
     private Coroutine _damageFlashRoutine;
+    private bool _isLevitating = false;
 
     // Pomocný enum pro RPC
     public enum VFX_Type { DodgeTrail, LandingDust }
@@ -51,7 +59,7 @@ public class PlayerVFX : NetworkBehaviour
         if (_attributes == null) _attributes = GetComponent<PlayerAttributes>();
         if (_animator == null) _animator = GetComponent<Animator>();
 
-        // --- ZMĚNA: Uložení původních materiálů ---
+        // Uložení původních materiálů
         _originalMaterials.Clear();
         if (_playerRenderers != null)
         {
@@ -59,23 +67,25 @@ public class PlayerVFX : NetworkBehaviour
             {
                 if (renderer != null)
                 {
-                    // Uložíme si kopii pole VŠECH materiálů, které renderer používá
                     _originalMaterials[renderer] = (Material[])renderer.materials.Clone();
                 }
             }
         }
-        // --- Konec Změny ---
 
         // Na začátku vše vypneme
-        if (_dodgeTrails != null) // ZMĚNA
+        if (_dodgeTrails != null)
         {
-            foreach (var trail in _dodgeTrails) // ZMĚNA
+            foreach (var trail in _dodgeTrails)
             {
-                if (trail != null) trail.emitting = false; // ZMĚNA
+                if (trail != null) trail.emitting = false;
             }
         }
 
         if (_sprintParticles != null) _sprintParticles.Stop();
+
+        // Vypneme i levitaci při startu
+        if (_bodyLevitationVFX != null) _bodyLevitationVFX.SetActive(false);
+        if (_groundLevitationVFX != null) _groundLevitationVFX.SetActive(false);
     }
 
     public override void OnDestroy()
@@ -95,12 +105,9 @@ public class PlayerVFX : NetworkBehaviour
     {
         try
         {
-            // Přihlásíme se k odběru změny NetworkVariable.
-            // Toto běží na VŠECH klientech.
             if (_attributes != null)
             {
                 _attributes.IsInvulnerable.OnValueChanged += OnInvulnerabilityChanged;
-                // Zavoláme hned, abychom nastavili správný materiál při spawnu
                 OnInvulnerabilityChanged(false, _attributes.IsInvulnerable.Value);
                 _attributes.CurrentHealth.OnValueChanged += OnHealthChanged;
             }
@@ -114,21 +121,17 @@ public class PlayerVFX : NetworkBehaviour
 
     public override void OnNetworkDespawn()
     {
-        // Vždy se odhlásíme z odběru
         if (_attributes != null)
         {
             _attributes.IsInvulnerable.OnValueChanged -= OnInvulnerabilityChanged;
             _attributes.CurrentHealth.OnValueChanged -= OnHealthChanged;
         }
 
-        // ZMĚNA: Při despawnu pro jistotu vrátíme původní materiály
-        // (Pokud by despawn nastal během nesmrtelnosti, poolovaný objekt by zůstal průhledný)
         RestoreOriginalMaterials();
     }
 
     private void OnHealthChanged(int previousValue, int newValue)
     {
-        // Pokud zdraví kleslo (poškození) A zároveň nejsme zrovna nesmrtelní (aby se nepřepínal materiál)
         if (newValue < previousValue && !_attributes.IsInvulnerable.Value)
         {
             TriggerDamageFlash();
@@ -145,13 +148,9 @@ public class PlayerVFX : NetworkBehaviour
 
     private IEnumerator DamageFlashRoutine()
     {
-        // 1. Nastavit červený materiál
         ApplyMaterialOverride(_damageMaterial);
-
-        // 2. Čekat
         yield return new WaitForSeconds(_damageFlashDuration);
 
-        // 3. Vrátit zpět (pokud mezitím nenastala nesmrtelnost)
         if (!_attributes.IsInvulnerable.Value)
         {
             RestoreOriginalMaterials();
@@ -159,38 +158,23 @@ public class PlayerVFX : NetworkBehaviour
         _damageFlashRoutine = null;
     }
 
-    /// <summary>
-    /// Callback pro změnu nesmrtelnosti. Běží na všech klientech.
-    /// </summary>
     private void OnInvulnerabilityChanged(bool previousValue, bool newValue)
     {
-        // ZMĚNA: Kontrolujeme pole rendererů
         if (_playerRenderers == null || _playerRenderers.Length == 0 || _invulnerableMaterial == null) return;
 
         if (newValue)
         {
-            // Projdeme všechny renderery
             foreach (var renderer in _playerRenderers)
             {
                 if (renderer == null) continue;
-
-                // Vytvoříme nové pole materiálů o stejné velikosti, jako mělo to původní
                 int materialCount = renderer.materials.Length;
                 Material[] invulnerableMaterials = new Material[materialCount];
-
-                // Všechny sloty vyplníme JEDNÍM nesmrtelným materiálem
-                for (int i = 0; i < materialCount; i++)
-                {
-                    invulnerableMaterials[i] = _invulnerableMaterial;
-                }
-
-                // Přiřadíme nové pole. Používáme .materials (množné číslo)
+                for (int i = 0; i < materialCount; i++) invulnerableMaterials[i] = _invulnerableMaterial;
                 renderer.materials = invulnerableMaterials;
             }
         }
         else
         {
-            // Vrátíme původní materiály
             RestoreOriginalMaterials();
         }
     }
@@ -207,14 +191,10 @@ public class PlayerVFX : NetworkBehaviour
         }
     }
 
-    /// <summary>
-    /// ZMĚNA: Nová pomocná metoda pro vrácení původních materiálů
-    /// </summary>
     private void RestoreOriginalMaterials()
     {
         foreach (var renderer in _playerRenderers)
         {
-            // Vrátíme původní pole materiálů uložené ve slovníku
             if (renderer != null && _originalMaterials.TryGetValue(renderer, out Material[] originalMats))
             {
                 renderer.materials = originalMats;
@@ -225,8 +205,6 @@ public class PlayerVFX : NetworkBehaviour
 
     private void Update()
     {
-        // Sprint částice jsou řízeny lokálně na základě synchronizovaného Animatoru
-        // (NetworkAnimator se stará o synchronizaci parametrů "IsSprinting" a "IsGrounded")
         if (_animator == null || _sprintParticles == null) return;
 
         bool isSprinting = _animator.GetBool("IsSprinting");
@@ -234,29 +212,47 @@ public class PlayerVFX : NetworkBehaviour
 
         if (isSprinting && isGrounded)
         {
-            if (!_sprintParticles.isEmitting)
-            {
-                _sprintParticles.Play(); // Spustíme looping efekt
-            }
+            if (!_sprintParticles.isEmitting) _sprintParticles.Play();
         }
         else
         {
-            if (_sprintParticles.isEmitting)
-            {
-                _sprintParticles.Stop(); // Zastavíme looping efekt
-            }
+            if (_sprintParticles.isEmitting) _sprintParticles.Stop();
+        }
+
+        UpdateLevitationVisuals();
+    }
+
+    private void UpdateLevitationVisuals()
+    {
+        // Pokud nelevitujeme nebo nemáme nastavený ground efekt, nic neděláme
+        if (!_isLevitating || _groundLevitationVFX == null) return;
+
+        // Vystřelíme paprsek z pozice hráče (trochu z výšky) směrem dolů
+        Vector3 rayOrigin = transform.position + Vector3.up * 1.5f;
+        
+        if (Physics.Raycast(rayOrigin, Vector3.down, out RaycastHit hit, 5f, _groundLayerMask))
+        {
+            // Našli jsme zem -> umístíme efekt na bod dopadu (hit.point)
+            _groundLevitationVFX.transform.position = hit.point;
+            
+            // Volitelné: Zarovnání rotace (aby se kruh netočil s hráčem, ale zůstal "světový")
+            // Nebo aby se točil podle hráče (Y osa), ale ležel na zemi.
+            // Zde nastavuji, aby sledoval rotaci hráče kolem osy Y:
+            _groundLevitationVFX.transform.rotation = Quaternion.Euler(0, transform.eulerAngles.y, 0);
+        }
+        else
+        {
+            // Pokud jsme nenašli zem (hráč je moc vysoko nebo nad dírou), 
+            // dáme efekt prostě pod hráče o kus níž (fallback)
+            _groundLevitationVFX.transform.position = transform.position + Vector3.down * 1.5f;
         }
     }
 
-    // --- Síťová logika pro efekty (Dodge a Dopad) ---
+    // --- RPCs ---
 
-    /// <summary>
-    /// Volá lokální hráč (Owner), aby zapnul/vypnul efekt (např. Trail)
-    /// </summary>
     [ServerRpc]
     public void ToggleVFXServerRpc(VFX_Type type, bool state)
     {
-        // Server přikáže všem klientům
         ToggleVFXClientRpc(type, state);
     }
 
@@ -265,27 +261,19 @@ public class PlayerVFX : NetworkBehaviour
     {
         if (type == VFX_Type.DodgeTrail)
         {
-            if (_dodgeTrails != null) // ZMĚNA
+            if (_dodgeTrails != null)
             {
-                // Projdeme všechny traily v poli a nastavíme 'emitting'
-                foreach (var trail in _dodgeTrails) // ZMĚNA
+                foreach (var trail in _dodgeTrails)
                 {
-                    if (trail != null)
-                    {
-                        trail.emitting = state;
-                    }
+                    if (trail != null) trail.emitting = state;
                 }
             }
         }
     }
 
-    /// <summary>
-    /// Volá lokální hráč (Owner), aby spustil jednorázový efekt (např. dopad)
-    /// </summary>
     [ServerRpc]
     public void SpawnVFXServerRpc(VFX_Type type)
     {
-        // Server přikáže všem klientům
         SpawnVFXClientRpc(type);
     }
 
@@ -296,9 +284,40 @@ public class PlayerVFX : NetworkBehaviour
         {
             if (_landingParticlesPrefab != null)
             {
-                // Spawne prefab na pozici hráče (na jeho nohou)
-                // Tento prefab by měl mít skript, který ho po přehrání sám zničí
                 Instantiate(_landingParticlesPrefab, transform.position, Quaternion.identity);
+            }
+        }
+    }
+
+    // --- NOVÉ: LEVITATION RPC ---
+    // Voláno z UpgradeShopUI.cs
+
+    [ServerRpc]
+    public void ToggleLevitationVFXServerRpc(bool active)
+    {
+        // Pošleme příkaz všem klientům
+        ToggleLevitationVFXClientRpc(active);
+    }
+
+    [ClientRpc]
+    private void ToggleLevitationVFXClientRpc(bool active)
+    {
+        _isLevitating = active;
+
+        // 1. Tělový efekt (Shine) - jen zapneme/vypneme
+        if (_bodyLevitationVFX != null)
+        {
+            _bodyLevitationVFX.SetActive(active);
+        }
+
+        // 2. Zemní efekt (Kruh) - zapneme/vypneme a resetujeme pozici
+        if (_groundLevitationVFX != null)
+        {
+            _groundLevitationVFX.SetActive(active);
+            if (active)
+            {
+                // Okamžitý update pozice při zapnutí, aby nebliknul na špatném místě
+                UpdateLevitationVisuals();
             }
         }
     }

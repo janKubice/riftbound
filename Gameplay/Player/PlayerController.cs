@@ -3,6 +3,7 @@ using UnityEngine.InputSystem;
 using Unity.Netcode;
 using Unity.Cinemachine;
 using System.Collections;
+using Unity.Netcode.Components;
 
 [RequireComponent(typeof(StatusEffectReceiver))]
 [RequireComponent(typeof(CharacterController))]
@@ -16,19 +17,14 @@ public class PlayerController : NetworkBehaviour
     [Header("Air Control")]
     [Range(0, 1)][SerializeField] private float _airControlFactor = 0.5f; // 50% ovladatelnost ve vzduchu
 
-    [Header("Smoothing")]
-    [SerializeField] private float _moveSmoothTime = 0.1f;
-    private Vector2 _currentInputVector;
-    private Vector2 _smoothInputVelocity;
-
     // NOVÉ: Přidáno pro Sprint
     [Header("Sprint")]
     [SerializeField] private float _sprintSpeed = 8.0f;
-    [SerializeField] private float _sprintStaminaCost = 15.0f; // Cena za sekundu
+    [SerializeField] private float _sprintStaminaCost = 5.0f; // Cena za sekundu
 
     [Header("Skok")]
     [SerializeField] private float _jumpHeight = 1.2f;
-    [SerializeField] private float _jumpStaminaCost = 20.0f; // Jednorázová cena
+    [SerializeField] private float _jumpStaminaCost = 15.0f; // Jednorázová cena
     private float _lastJumpInputTime;
     private float _jumpBufferDuration = 0.2f;
     private bool _wasGroundedLastFrame = true;
@@ -36,7 +32,7 @@ public class PlayerController : NetworkBehaviour
     private int _currentJumpCount;
 
     [Header("Úhyb (Dodge)")]
-    [SerializeField] private float _dodgeStaminaCost = 25.0f;
+    [SerializeField] private float _dodgeStaminaCost = 20.0f;
     [SerializeField] private float _dodgeDuration = 0.3f;
     [SerializeField] private float _dodgeSpeed = 15.0f;
     [SerializeField] private float _dodgeInvulnerabilityTime = 0.2f; // Musí být <= _dodgeDuration
@@ -47,6 +43,9 @@ public class PlayerController : NetworkBehaviour
     [SerializeField] private float _slideSpeed = 10f;
     [SerializeField] private float _slideDuration = 0.8f;
     [SerializeField] private float _slideHeight = 1.0f; // Výška collideru při skluzu
+    [SerializeField] private float _sprintMemoryDuration = 0.5f; 
+    private float _lastSprintTime;
+    
     private float _originalHeight;
     private Vector3 _originalCenter;
     private bool _isSliding;
@@ -85,6 +84,13 @@ public class PlayerController : NetworkBehaviour
     [Header("Emotes")]
     [SerializeField] private PlayerEmotes _playerEmotes;
 
+    [Header("Shop Levitation")]
+    [SerializeField] private float _levitationHeight = 2.0f; // Jak vysoko vyletí
+    [SerializeField] private float _levitationSpeed = 0.5f;  // Jak rychle tam vyletí
+
+    private bool _isInShopMode = false;
+    private float _shopGroundY; // Uložená výška podlahy
+
     // --- Odkazy na komponenty ---
     // Odkaz na PlayerAttributes pro kontrolu staminy
     private PlayerAttributes _attributes;
@@ -116,6 +122,8 @@ public class PlayerController : NetworkBehaviour
     private float _lastSentRight = 0f;
     private bool _lastSentSprinting = false;
     private bool _lastSentGrounded = true;
+    // NOVÉ: Proměnná pro zamknutí ovládání (Shop, Cutscény, atd.)
+    private bool _inputLocked = false;
     private void Awake()
     {
         if (_controller == null) _controller = GetComponent<CharacterController>();
@@ -254,6 +262,44 @@ public class PlayerController : NetworkBehaviour
             return; // Ukončíme Update před pohybem a střelbou
         }
 
+        if (_inputLocked)
+        {
+            HandleGravity(); // Abychom neviseli ve vzduchu, pokud nechceme
+                             // Pokud chceš levitovat, můžeš dát: if (!_inputLocked) HandleGravity();
+
+            // Aplikujeme pouze vertikální pohyb (pád), žádný WASD
+            _controller.Move(new Vector3(0, _playerVelocity.y, 0) * Time.deltaTime);
+
+            // Animace musíme stále posílat (že stojíme), jinak se zaseknou
+            HandleAnimation();
+            return;
+        }
+
+        if (_isInShopMode)
+        {
+            // Cílová výška = zem + 2 metry
+            float targetY = _shopGroundY + _levitationHeight;
+
+            // Plynulý přesun (Lerp) aktuální výšky směrem k cíli
+            // Používáme Move(), aby CharacterController respektoval kolize (pro jistotu)
+            float nextY = Mathf.Lerp(transform.position.y, targetY, Time.deltaTime * _levitationSpeed);
+            float diff = nextY - transform.position.y;
+
+            _controller.Move(Vector3.up * diff);
+
+            // Stále posíláme animace (že stojíme/levitujeme), aby se neasekly
+            HandleAnimation();
+            return; // Ukončíme Update, aby se nepočítala gravitace a WASD
+        }
+
+        if (_isSliding)
+        {
+            // Můžeme sem přidat logiku kamery/rotace pokud chceš během slidu zatáčet,
+            // ale CharacterController.Move by se tu volat neměl.
+            HandleAnimation();
+            return;
+        }
+
         CheckGrounded();
 
         if (_isDodging)
@@ -367,6 +413,12 @@ public class PlayerController : NetworkBehaviour
         base.OnNetworkSpawn();
         if (IsOwner)
         {
+            var netTransform = GetComponent<NetworkTransform>();
+            if (netTransform != null)
+            {
+                netTransform.Teleport(transform.position, transform.rotation, transform.localScale);
+            }
+
             StartCoroutine(WaitForCameraRoutine());
         }
     }
@@ -381,26 +433,44 @@ public class PlayerController : NetworkBehaviour
             cam = FindFirstObjectByType<CinemachineCamera>(FindObjectsInactive.Include);
             if (cam == null)
             {
-                yield return null; // Počká na další frame
+                yield return null;
             }
         }
 
-        // Inicializace po nalezení
-        _playerVirtualCameraObject = cam.gameObject;
-        _playerVirtualCameraObject.SetActive(true);
+        // --- OPRAVA PODZEMNÍ KAMERY ---
+
+        // 1. Vypneme kameru (pro jistotu, aby nepočítala frame z nuly)
+        cam.enabled = false;
+
+        // 2. "Hard" teleport samotného objektu kamery na pozici hráče
+        // Tím zajistíme, že fyzicky startuje u hlavy hráče, ne v podzemí na 0,0,0
+        // (Použijeme _cameraFollowTarget, což je ten bod za krkem/hlavou)
+        if (_cameraFollowTarget != null)
+        {
+            cam.transform.position = _cameraFollowTarget.position;
+            cam.transform.rotation = _cameraFollowTarget.rotation;
+        }
+
+        // 3. Přiřadíme cíle
         cam.Follow = _cameraFollowTarget;
         cam.LookAt = _cameraFollowTarget;
+
+        // 4. Resetujeme interní stav Cinemachine (aby si nemyslela, že musí interpolovat)
+        // Toto volání řekne: "Cíl se teleportoval, zapomeň na předchozí pozici."
+        cam.OnTargetObjectWarped(_cameraFollowTarget, Vector3.zero);
+
+        // 5. Zapneme kameru zpět
+        cam.enabled = true;
+        _playerVirtualCameraObject = cam.gameObject;
+        _playerVirtualCameraObject.SetActive(true);
 
         if (cam.TryGetComponent(out PlayerCameraEffects effects))
         {
             effects.Initialize(_animator);
         }
 
-        if (!StatusEffectDebugger.IsMenuOpen)
-        {
-            Cursor.lockState = CursorLockMode.Locked;
-            Cursor.visible = false;
-        }
+        Cursor.lockState = CursorLockMode.Locked;
+        Cursor.visible = false;
     }
 
     private void HandleGravity()
@@ -514,6 +584,8 @@ public class PlayerController : NetworkBehaviour
                 // Ne, došla stamina nebo stojíme/couváme -> vypneme sprint
                 _isSprinting = false;
             }
+
+            _lastSprintTime = Time.time;
         }
 
         // Pokud klávesu nedržíme, _isSprinting je už false z OnSprint()
@@ -614,9 +686,19 @@ public class PlayerController : NetworkBehaviour
     {
         if (!IsOwner) return;
 
-        if (context.performed && _isSprinting && _isGrounded && !_isSliding)
+        // Pokud zmáčknu tlačítko, jsem na zemi a nejsem už ve skluzu
+        if (context.performed && _isGrounded && !_isSliding)
         {
-            StartCoroutine(SlideRoutine());
+            // LOGIKA BUFFERU:
+            // 1. Držíme sprint?
+            // 2. NEBO jsme sprint pustili před méně než X sekundami? (_sprintMemoryDuration)
+            bool wasSprintingRecently = _isSprinting || (Time.time - _lastSprintTime < _sprintMemoryDuration);
+
+            // Musíme se také hýbat dopředu (y > 0.1f), abychom neslidovali z místa
+            if (wasSprintingRecently && _moveInput.y > 0.1f)
+            {
+                StartCoroutine(SlideRoutine());
+            }
         }
     }
 
@@ -624,32 +706,41 @@ public class PlayerController : NetworkBehaviour
     {
         _isSliding = true;
 
-        // 1. Zmenšení Collideru
+        // Zmenšení collideru
         _controller.height = _slideHeight;
         _controller.center = new Vector3(_originalCenter.x, _slideHeight / 2f, _originalCenter.z);
 
-        // 2. Aplikace počátečního impulzu (pokud chceš "boost")
-        // Zde využijeme existující směr pohybu, ne aktuální input (aby nešlo zatáčet)
+        // Směr podle terénu (viz předchozí oprava)
         Vector3 slideDirection = transform.forward;
+        if (Physics.Raycast(transform.position, Vector3.down, out RaycastHit hit, 2.0f))
+        {
+            slideDirection = Vector3.ProjectOnPlane(transform.forward, hit.normal).normalized;
+        }
+
+        // NOVÉ: Zachování hybnosti
+        // Pokud sprintuju rychleji než je nastavený slide, použiju svou aktuální rychlost jako startovní.
+        float currentSpeed = Velocity.magnitude;
+        float startSlideSpeed = Mathf.Max(_slideSpeed, currentSpeed); 
 
         float timer = 0f;
+
         while (timer < _slideDuration)
         {
-            // 3. Pohyb s postupným zpomalováním (Friction)
-            float currentSlideSpeed = Mathf.Lerp(_slideSpeed, 0f, timer / _slideDuration);
+            // Lerpujeme z (Možná Boostnuté) rychlosti do nuly nebo do chůze
+            // Díky tomu bude slide působit dynamičtěji na začátku
+            float speed = Mathf.Lerp(startSlideSpeed, _moveSpeed, timer / _slideDuration);
 
-            // Aplikujeme pohyb (gravitace se stále počítá v Update -> HandleGravity)
-            // Pouze horizontální složka
-            _controller.Move(slideDirection * currentSlideSpeed * Time.deltaTime);
+            Vector3 moveVector = slideDirection * speed;
+            moveVector.y += _gravityValue; // Gravitace
 
-            // Pokud hráč vyskočí nebo narazí do zdi, přerušit
-            if (!_isGrounded || _controller.velocity.magnitude < 0.5f) break;
+            _controller.Move(moveVector * Time.deltaTime);
+
+            if (_controller.velocity.magnitude < 1f && timer > 0.1f) break;
 
             timer += Time.deltaTime;
             yield return null;
         }
 
-        // 4. Návrat do normálu
         _controller.height = _originalHeight;
         _controller.center = _originalCenter;
         _isSliding = false;
@@ -768,6 +859,43 @@ public class PlayerController : NetworkBehaviour
         if (_animator != null)
         {
             _animator.SetTrigger(triggerHash);
+        }
+    }
+
+    public void SetInputLocked(bool locked)
+    {
+        _inputLocked = locked;
+
+        // Pokud zamykáme, okamžitě vynulujeme animace, aby postava neběžela na místě
+        if (_inputLocked && _animator != null)
+        {
+            _animator.SetFloat(_forwardSpeedHash, 0f);
+            _animator.SetFloat(_rightSpeedHash, 0f);
+            _animator.SetBool(_isSprintingHash, false);
+        }
+    }
+
+    public void SetShopMode(bool active)
+    {
+        _isInShopMode = active;
+
+        if (active)
+        {
+            // 1. Uložíme si, kde je zem (aktuální pozice hráče)
+            _shopGroundY = transform.position.y;
+
+            // 2. Vynulujeme animace, aby neběžel ve vzduchu
+            if (_animator != null)
+            {
+                _animator.SetFloat(_forwardSpeedHash, 0f);
+                _animator.SetFloat(_rightSpeedHash, 0f);
+                _animator.SetBool(_isSprintingHash, false);
+                // Můžeme nastavit, že není na zemi, aby animátor mohl přejít do "Floating/Falling" animace, pokud ji máš
+                _animator.SetBool(_isGroundedHash, false);
+            }
+
+            // 3. Resetujeme rychlost, aby nevystřelil setrvačností
+            _playerVelocity = Vector3.zero;
         }
     }
 }

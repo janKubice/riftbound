@@ -75,7 +75,7 @@ public class GameLifecycleManager : NetworkBehaviour
         int index = (int)clientId % _spawnPoints.Length;
         Vector3 spawnPos = (_spawnPoints != null && _spawnPoints.Length > 0)
             ? _spawnPoints[index].position
-            : Vector3.zero;
+            : new Vector3(0, 2, 0); // Změna: Místo 0,0,0 dáme 0,2,0 (bezpečnější výška)
 
         Quaternion spawnRot = (_spawnPoints != null && _spawnPoints.Length > 0)
             ? _spawnPoints[index].rotation
@@ -84,7 +84,18 @@ public class GameLifecycleManager : NetworkBehaviour
         GameObject newPlayer = Instantiate(_guyPrefab, spawnPos, spawnRot);
         newPlayer.name = $"Player_Client_{clientId}";
 
+        // FIX: Ujistíme se, že CharacterController neblokuje spawn pozici
+        var cc = newPlayer.GetComponent<CharacterController>();
+        if (cc != null) cc.enabled = false;
+
+        newPlayer.transform.position = spawnPos; // Vynucení pozice
+
+        // Zapneme CC až po nastavení pozice (ideálně s malým zpožděním, ale pro spawn stačí takto)
+        if (cc != null) cc.enabled = true;
+
         newPlayer.GetComponent<NetworkObject>().SpawnAsPlayerObject(clientId, true);
+        Cursor.lockState = CursorLockMode.Locked;
+        Cursor.visible = false;
     }
 
     [ClientRpc]

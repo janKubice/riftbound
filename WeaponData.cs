@@ -10,6 +10,10 @@ public class WeaponData : ScriptableObject
     [Header("Stats")]
     public WeaponStats BaseStats; // Výchozí hodnoty
 
+    [Header("Economy")]
+    public int GoldPrice = 100;
+    public int EssencePrice = 0;
+
     [Header("Logika")]
     public AttackLogic AttackLogic; // ScriptableObject definující chování (Projectile, Melee, Bomb...)
 

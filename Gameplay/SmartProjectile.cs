@@ -15,12 +15,19 @@ public class SmartProjectile : NetworkBehaviour
     private HashSet<GameObject> _hitHistory = new HashSet<GameObject>();
     private Rigidbody _rb;
 
+    // --- FIX 1: Ochrana proti okamžitému výbuchu (Grace Period) ---
+    private float _spawnTime;
+    private const float COLLISION_GRACE_PERIOD = 0.05f; // 50ms ignorování kolizí po spawnu
+
     public void Initialize(ulong ownerId, Vector3 direction, WeaponStats stats)
     {
         _ownerClientId = ownerId;
         _stats = stats;
         _pierceLeft = stats.PierceCount;
         _startPosition = transform.position;
+        
+        // Zaznamenáme čas vzniku
+        _spawnTime = Time.time;
 
         _rb = GetComponent<Rigidbody>();
         _rb.useGravity = false;
@@ -70,25 +77,39 @@ public class SmartProjectile : NetworkBehaviour
     {
         if (!IsServer) return;
 
-        if (other.TryGetComponent(out NetworkObject netObj))
+        // --- FIX 1: Ignorujeme kolize těsně po spawnu ---
+        if (Time.time < _spawnTime + COLLISION_GRACE_PERIOD) return;
+
+        // --- FIX 2: Kontrola Vlastníka (hledáme i v rodičích) ---
+        // Používáme GetComponentInParent, abychom našli NetworkObject i na kořeni postavy,
+        // pokud jsme trefili child objekt (např. ruku nebo zbraň).
+        var netObj = other.GetComponentInParent<NetworkObject>();
+        if (netObj != null)
         {
+            // Pokud jsme trefili sami sebe, ignorujeme to
             if (netObj.OwnerClientId == _ownerClientId) return;
         }
 
+        // Kontrola, zda jsme tento objekt už netrefili (pro piercing)
         if (_hitHistory.Contains(other.gameObject)) return;
 
         bool hitEnemy = false;
 
-        if (other.TryGetComponent(out EnemyHealth enemy))
+        // --- FIX 3: Robustnější detekce zásahu (hledáme i v rodičích) ---
+        
+        // A) Nepřítel
+        if (other.TryGetComponent(out EnemyHealth enemy) || (enemy = other.GetComponentInParent<EnemyHealth>()))
         {
             enemy.TakeDamage(_stats.Damage);
             hitEnemy = true;
         }
-        else if (other.TryGetComponent(out PlayerAttributes player))
+        // B) Hráč (PvP)
+        else if (other.TryGetComponent(out PlayerAttributes player) || (player = other.GetComponentInParent<PlayerAttributes>()))
         {
             player.TakeDamageServerRpc(_stats.Damage);
             hitEnemy = true;
         }
+        // C) Prostředí (Zeď/Podlaha) - pokud to není trigger
         else if (!other.isTrigger)
         {
             SpawnImpact(transform.position, -transform.forward);
@@ -96,6 +117,7 @@ public class SmartProjectile : NetworkBehaviour
             return;
         }
 
+        // Pokud jsme někoho trefili
         if (hitEnemy)
         {
             _hitHistory.Add(other.gameObject);
@@ -114,7 +136,8 @@ public class SmartProjectile : NetworkBehaviour
 
     private void SpawnImpact(Vector3 pos, Vector3 normal)
     {
-        // Zde implementujte ClientRpc pro VFX
+        // Zde můžete doplnit logiku pro spawn efektů (ClientRpc)
+        // Např. NetworkManager.Singleton.SpawnManager... nebo vaše vlastní VFX řešení
     }
 
     private void DestroyProjectile()

@@ -13,10 +13,28 @@ public class ProjectileAttackLogic : AttackLogic
             return;
         }
 
-        // 2. Počet projektilů (pro Brokovnice/Spread)
-        // Pokud je ProjectileCount 1, Spread se ignoruje
-        // Pokud je > 1, rozpočítáme úhel
+        // --- OPRAVA SMĚRU STŘELBY ---
+        // Místo spoléhání se na rotaci zbraně (která se nemusí hýbat nahoru/dolů)
+        // si vypočítáme rotaci přímo k bodu, kam hráč míří.
         
+        Quaternion attackRotation = firePoint.rotation; // Fallback (pro AI nebo chyby)
+
+        if (attacker.TryGetComponent(out PlayerAiming aiming))
+        {
+            // Získáme bod v prostoru, kam hráč právě kouká (synchronizováno přes síť)
+            Vector3 targetPoint = aiming.CurrentAimPoint;
+            
+            // Vypočítáme vektor od hlavně k tomuto bodu
+            Vector3 directionToTarget = (targetPoint - firePoint.position).normalized;
+
+            // Vytvoříme novou rotaci, která kouká přesně tam
+            if (directionToTarget != Vector3.zero)
+            {
+                attackRotation = Quaternion.LookRotation(directionToTarget);
+            }
+        }
+
+        // 2. Počet projektilů (Spread logic)
         int count = Mathf.Max(1, stats.ProjectileCount);
         float startAngle = -stats.Spread / 2f;
         float angleStep = count > 1 ? stats.Spread / (count - 1) : 0f;
@@ -25,9 +43,10 @@ public class ProjectileAttackLogic : AttackLogic
         {
             float currentAngle = startAngle + (angleStep * i);
             
-            // Rotace výstřelu podle rozptylu
+            // Rotace výstřelu podle rozptylu (přičítáme k naší vypočítané attackRotation)
+            // Pozor: Spread aplikujeme lokálně k rotaci (proto násobení zprava)
             Quaternion spreadRot = Quaternion.Euler(0, currentAngle, 0);
-            Quaternion finalRot = firePoint.rotation * spreadRot;
+            Quaternion finalRot = attackRotation * spreadRot;
 
             // 3. Instanciace
             GameObject projGO = Instantiate(
@@ -41,7 +60,7 @@ public class ProjectileAttackLogic : AttackLogic
             {
                 smartProj.GetComponent<NetworkObject>().Spawn(true);
                 
-                // Inicializujeme s aktuálními staty (včetně Pierce, Speed, Damage)
+                // Inicializujeme s vypočítanou rotací
                 smartProj.Initialize(attacker.OwnerClientId, finalRot * Vector3.forward, stats);
             }
             else

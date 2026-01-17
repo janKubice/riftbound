@@ -31,7 +31,7 @@ public class WeaponManager : NetworkBehaviour
 
     // Síťová proměnná, která říká, jaký prefab zbraně se má zobrazit (index do seznamu _weaponPrefabs)
     // -1 znamená beze zbraně (unarmed)
-    private NetworkVariable<int> _currentWeaponIndex = new NetworkVariable<int>(-1, NetworkVariableReadPermission.Everyone, NetworkVariableWritePermission.Server);
+    public NetworkVariable<int> _currentWeaponIndex = new NetworkVariable<int>(-1, NetworkVariableReadPermission.Everyone, NetworkVariableWritePermission.Server);
     private float _lastAttackTime = -999f;
 
     [SerializeField] private WeaponVisualsController _visuals;
@@ -52,6 +52,12 @@ public class WeaponManager : NetworkBehaviour
         catch (System.Exception e)
         {
             Debug.LogError($"[CRITICAL SPAWN ERROR] Chyba v {name}: {e.Message}\n{e.StackTrace}");
+        }
+
+        if (IsServer)
+        {
+            // Pokud začínáme bez zbraně
+            _currentWeaponIndex.Value = -1; 
         }
 
     }
@@ -320,7 +326,7 @@ public class WeaponManager : NetworkBehaviour
 
     public void TryAttackLocalLoop()
     {
-        Debug.Log("[WeaponManager] pokus o loop útok.");
+        //Debug.Log("[WeaponManager] pokus o loop útok.");
         // Lokální kontrola cooldownu používá runtime staty
         float cd = _currentRuntimeStats.Cooldown > 0 ? _currentRuntimeStats.Cooldown : 0.1f;
 
@@ -354,5 +360,50 @@ public class WeaponManager : NetworkBehaviour
         _animOverrideController["Idle"] = data.Idle;
         _animOverrideController["Running_A"] = data.Walk;
         _animOverrideController["1H_Melee_Attack_Chop"] = data.Attack1;
+    }
+
+
+    /// <summary>
+    /// Helper metoda pro Shop. Zjistí data zbraně (Cenu, Ikonu) jen podle čísla v listu.
+    /// </summary>
+    public WeaponData GetWeaponDataByIndex(int index)
+    {
+        // 1. Kontrola rozsahu listu
+        if (_weaponPrefabs == null)
+        {
+            Debug.LogError("[WeaponManager] CHYBA: List '_weaponPrefabs' není inicializován!");
+            return null;
+        }
+
+        if (index < 0 || index >= _weaponPrefabs.Count)
+        {
+            Debug.LogError($"[WeaponManager] CHYBA: NPC chce zbraň ID {index}, ale v listu hráče je jen {_weaponPrefabs.Count} zbraní!");
+            return null;
+        }
+
+        // 2. Kontrola prefabu
+        GameObject prefab = _weaponPrefabs[index];
+        if (prefab == null)
+        {
+            Debug.LogError($"[WeaponManager] CHYBA: Na indexu {index} je v listu 'None' (chybí prefab)!");
+            return null;
+        }
+
+        // 3. Kontrola Holderu
+        var holder = prefab.GetComponent<WeaponDataHolder>();
+        if (holder == null)
+        {
+            Debug.LogError($"[WeaponManager] CHYBA: Prefab '{prefab.name}' nemá skript 'WeaponDataHolder'!");
+            return null;
+        }
+
+        // 4. Kontrola Dat
+        if (holder.Data == null)
+        {
+            Debug.LogError($"[WeaponManager] CHYBA: Prefab '{prefab.name}' má Holder, ale chybí v něm 'WeaponData' (ScriptableObject)!");
+            return null;
+        }
+
+        return holder.Data;
     }
 }

@@ -11,16 +11,22 @@ public class PlayerProgression : NetworkBehaviour
 
     // XP synchronizované pro klienta (aby viděl UI)
     public NetworkVariable<int> CurrentXP = new NetworkVariable<int>(0, NetworkVariableReadPermission.Everyone, NetworkVariableWritePermission.Server);
-
+    public NetworkVariable<int> Gold = new NetworkVariable<int>(0, NetworkVariableReadPermission.Everyone, NetworkVariableWritePermission.Server);
+    public NetworkVariable<int> Essence = new NetworkVariable<int>(0, NetworkVariableReadPermission.Everyone, NetworkVariableWritePermission.Server);
     // Uchováváme level každého upgradu. Klíč je index v listu _availableUpgrades.
     // Index 0 je MaxHealth, Index 1 je Speed... atd.
+
+    [Header("Starting Values")]
+    [SerializeField] private int _startXP = 5000;
+    [SerializeField] private int _startGold = 300;
+    [SerializeField] private int _startEssence = 10;
     private NetworkList<int> _upgradeLevels;
 
     // Cache pro rychlý přístup k vypočítaným hodnotám (pouze Server + Local Owner)
     private Dictionary<StatType, float> _cachedValues = new Dictionary<StatType, float>();
 
     // Eventy pro UI
-    public event Action OnXPChanged;
+    public event Action OnResourcesChanged;
     public event Action OnUpgradePurchased;
 
     private void Awake()
@@ -37,16 +43,25 @@ public class PlayerProgression : NetworkBehaviour
             {
                 _upgradeLevels.Add(0);
             }
+
+            // 2. Nastavení startovních surovin (POUZE SERVER)
+            CurrentXP.Value = _startXP;
+            Gold.Value = _startGold;
+            Essence.Value = _startEssence;
         }
 
-        CurrentXP.OnValueChanged += (oldVal, newVal) => OnXPChanged?.Invoke();
+        CurrentXP.OnValueChanged += (o, n) => OnResourcesChanged?.Invoke();
+        Gold.OnValueChanged += (o, n) => OnResourcesChanged?.Invoke();
+        Essence.OnValueChanged += (o, n) => OnResourcesChanged?.Invoke(); 
+        
         _upgradeLevels.OnListChanged += (changeEvent) =>
         {
             RecalculateStats();
             OnUpgradePurchased?.Invoke();
         };
 
-        RecalculateStats(); // První kalkulace
+        RecalculateStats(); 
+        OnResourcesChanged?.Invoke();
     }
 
     // --- VEŘEJNÉ API (Volá se ze hry) ---
@@ -55,6 +70,38 @@ public class PlayerProgression : NetworkBehaviour
     {
         if (!IsServer) return;
         CurrentXP.Value += amount;
+    }
+
+    public bool TrySpendGold(int amount)
+    {
+        if (!IsServer) return false;
+        if (Gold.Value >= amount)
+        {
+            Gold.Value -= amount;
+            return true;
+        }
+        return false;
+    }
+
+    public void AddGold(int amount)
+    {
+        if (IsServer) Gold.Value += amount;
+    }
+
+    public bool TrySpendEssence(int amount)
+    {
+        if (!IsServer) return false;
+        if (Essence.Value >= amount)
+        {
+            Essence.Value -= amount;
+            return true;
+        }
+        return false;
+    }
+
+    public void AddEssence(int amount)
+    {
+        if (IsServer) Essence.Value += amount;
     }
 
     // --- SYSTÉM NÁKUPU ---

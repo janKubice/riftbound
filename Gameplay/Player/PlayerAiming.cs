@@ -9,6 +9,13 @@ public class PlayerAiming : NetworkBehaviour
     [SerializeField] private Rig _aimRig; // Komponenta Rig na objektu AimRig
     [SerializeField] private float _aimSmoothSpeed = 15f;
 
+    [Header("Aiming Logic")] 
+    [SerializeField] private float _maxAimDistance = 1000000f;
+    [Tooltip("Vrstvy, do kterých může Raycast narazit. MUSÍTE zde odškrtnout vrstvu 'Player'!")]
+    [SerializeField] private LayerMask _aimLayers; 
+    [Tooltip("Pokud je překážka blíž než tato vzdálenost, budeme ji ignorovat a mířit do dálky (řeší zdi těsně za zády).")]
+    [SerializeField] private float _minAimDistance = 1.5f;
+
     [Header("Idle Look Logic")]
     [SerializeField] private float _idleLookRadius = 10f;
     [SerializeField] private LayerMask _playerLayer;
@@ -81,44 +88,48 @@ public class PlayerAiming : NetworkBehaviour
         if (_mainCamera == null)
         {
             _mainCamera = Camera.main;
+            if (_mainCamera == null) return;
         }
 
-        // 2. Pokud ani teď nemáme kameru (např. při načítání scény), raději to přeskočíme, aby hra nespadla.
-        if (_mainCamera == null)
-        {
-            return;
-        }
+        Vector3 targetPoint;
+        bool isIdle = _controller != null && _controller.Velocity.magnitude < 0.1f;
 
-        Vector3 targetPoint = Vector3.zero;
-        bool isIdle = _controller.Velocity.magnitude < 0.1f; // Předpokládám public property Velocity v PlayerController
-
-        // 1. Logika: Pokud se hýbu nebo mířím myší
-        // Raycast ze středu obrazovky
+        // 1. Raycast ze středu obrazovky
         Ray ray = _mainCamera.ViewportPointToRay(new Vector3(0.5f, 0.5f, 0));
+        
+        // Výchozí bod v dálce (pokud nic netrefíme nebo trefíme něco moc blízko)
+        Vector3 pointAtInfinity = ray.GetPoint(_maxAimDistance);
 
-        // Fixní vzdálenost pokud nic netrefíme (aby se postava nekroutila divně)
-        Vector3 defaultAimPoint = ray.GetPoint(20f);
-
-        if (Physics.Raycast(ray, out RaycastHit hit, 100f))
+        // Zde je klíčová změna: Používáme _aimLayers a ignorujeme Triggery
+        if (Physics.Raycast(ray, out RaycastHit hit, _maxAimDistance, _aimLayers, QueryTriggerInteraction.Ignore))
         {
-            targetPoint = hit.point;
+            // OCHRANA: Pokud jsme trefili něco extrémně blízko kamery (např. zeď, u které stojíme zády,
+            // nebo vlastní collider, pokud není správně nastaven LayerMask), ignorujeme to.
+            if (hit.distance < _minAimDistance)
+            {
+                targetPoint = pointAtInfinity;
+            }
+            else
+            {
+                targetPoint = hit.point;
+            }
         }
         else
         {
-            targetPoint = defaultAimPoint;
+            targetPoint = pointAtInfinity;
         }
 
-        // 2. Logika: Idle Look (Koukání na ostatní)
+        // 2. Idle Look (beze změny)
         if (isIdle)
         {
             HandleIdleLooking(ref targetPoint);
         }
         else
         {
-            _currentTargetPlayer = null; // Reset pokud se pohnu
+            _currentTargetPlayer = null;
         }
 
-        // 3. Update lokální proměnné a sítě
+        // 3. Update (beze změny)
         _currentAimPos = Vector3.Lerp(_currentAimPos, targetPoint, Time.deltaTime * _aimSmoothSpeed);
         _networkAimPosition.Value = _currentAimPos;
     }
