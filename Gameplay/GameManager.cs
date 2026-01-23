@@ -9,22 +9,12 @@ public class GameManager : NetworkBehaviour
     [SerializeField] private GameObject _playerPrefab;
     [SerializeField] private Transform _playerSpawnPoint;
 
-    [Header("Spawnování Nepřátel")]
-    [SerializeField] private GameObject _enemyPrefab;
-    [SerializeField] private float _spawnInterval = 2.0f;
-    [SerializeField] private float _spawnRadius = 15f;
-    [SerializeField] private Transform _spawnCenter; // Centrum spawnování
 
     [Header("UI")]
     [SerializeField] private GameObject _pauseMenuPanel;
 
     private void Start()
     {
-        // Spawnování hráče už neřešíme, dělá to NGO
-
-        if (_spawnCenter == null)
-            _spawnCenter = this.transform;
-
         if (_pauseMenuPanel)
             _pauseMenuPanel.SetActive(false);
     }
@@ -42,37 +32,6 @@ public class GameManager : NetworkBehaviour
         base.OnDestroy();
     }
 
-    public override void OnNetworkSpawn()
-    {
-        base.OnNetworkSpawn();
-
-        // Spawnování nepřátel spouští POUZE server
-        // OnNetworkSpawn() se volá až poté, co je síť aktivní a IsServer je platné.
-        if (IsServer)
-        {
-            StartCoroutine(SpawnEnemyRoutine());
-        }
-    }
-
-    private IEnumerator SpawnEnemyRoutine()
-    {
-        while (true)
-        {
-            // Počkáme daný interval
-            yield return new WaitForSeconds(_spawnInterval);
-
-            if (_enemyPrefab == null) continue;
-
-            // Najde náhodnou pozici v kruhu
-            Vector2 randomCircle = Random.insideUnitCircle.normalized * _spawnRadius;
-            Vector3 spawnPos = _spawnCenter.position + new Vector3(randomCircle.x, 0.5f, randomCircle.y);
-
-            GameObject enemyGO = Instantiate(_enemyPrefab, spawnPos, Quaternion.identity);
-
-            // Spawnování na síti (vytvoří objekt i u klientů)
-            enemyGO.GetComponent<NetworkObject>().Spawn(true);
-        }
-    }
 
 
 }

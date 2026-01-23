@@ -9,8 +9,8 @@ public static class NetSafe
         
         if (obj.name.Contains("Player") || obj.name.Contains("Clone"))
         {
-            UnityEngine.Debug.LogError($"[NETSAFE TRACE] Někdo chce zničit {obj.name}!");
-            UnityEngine.Debug.LogError($"[NETSAFE TRACE] Volající: {System.Environment.StackTrace}");
+            //UnityEngine.Debug.LogError($"[NETSAFE TRACE] Někdo chce zničit {obj.name}!");
+            //UnityEngine.Debug.LogError($"[NETSAFE TRACE] Volající: {System.Environment.StackTrace}");
         }
 
         // Zkusíme najít NetworkObject

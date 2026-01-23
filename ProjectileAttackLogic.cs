@@ -6,6 +6,7 @@ public class ProjectileAttackLogic : AttackLogic
 {
     public override void ExecuteAttack(NetworkObject attacker, WeaponManager weaponManager, Transform firePoint, WeaponStats stats)
     {
+        Debug.Log($"[DEBUG ÚTOK] 1. Útok spuštěn! (Server: {NetworkManager.Singleton.IsServer})");
         // 1. Validace
         if (weaponManager.CurrentWeaponData == null || weaponManager.CurrentWeaponData.ProjectilePrefab == null)
         {
@@ -61,8 +62,7 @@ public class ProjectileAttackLogic : AttackLogic
                 smartProj.GetComponent<NetworkObject>().Spawn(true);
                 
                 // Inicializujeme s vypočítanou rotací
-                smartProj.Initialize(attacker.OwnerClientId, finalRot * Vector3.forward, stats);
-            }
+                smartProj.Initialize(attacker, finalRot * Vector3.forward, stats);            }
             else
             {
                 Debug.LogError("ProjectilePrefab nemá komponentu SmartProjectile!");

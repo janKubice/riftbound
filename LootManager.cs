@@ -1,90 +1,75 @@
 using UnityEngine;
 using Unity.Netcode;
+using System.Collections.Generic;
 
 public class LootManager : NetworkBehaviour
 {
     public static LootManager Instance { get; private set; }
 
-    [Header("Prefabs")]
+    [Header("Prefabs (Lokální)")]
     [SerializeField] private GameObject _xpOrbPrefab;
     [SerializeField] private GameObject _goldPrefab;
+    [SerializeField] private GameObject _healthPrefab;
 
     private void Awake()
     {
+        if (Instance != null && Instance != this) Destroy(gameObject);
         Instance = this;
     }
 
-    // --- Server API ---
-
     /// <summary>
-    /// Spawnne loot specifickému hráči (ostatní ho neuvidí).
+    /// HLAVNÍ METODA: Zavolá se na serveru (např. když umře mob).
     /// </summary>
-    public void SpawnLootForPlayer(ulong playerId, Vector3 position, LootType type, int amount)
+    public void SpawnLoot(Vector3 position, LootTable table)
     {
-        if (!IsServer) return;
+        if (!IsServer || table == null) return;
 
-        ClientRpcParams clientParams = new ClientRpcParams
+        // 1. Vybereme, co má padnout
+        if (table.TryGetLoot(out LootEntry entry, out int amount))
         {
-            Send = new ClientRpcSendParams
-            {
-                TargetClientIds = new ulong[] { playerId }
-            }
-        };
-
-        SpawnLootClientRpc(position, type, amount, clientParams);
-    }
-
-    /// <summary>
-    /// Spawnne loot všem (např. truhla pro všechny).
-    /// </summary>
-    public void SpawnGlobalLoot(Vector3 position, LootType type, int amount)
-    {
-        if (!IsServer) return;
-        SpawnLootClientRpc(position, type, amount);
-    }
-
-    // --- Client Side Logic ---
-
-    [ClientRpc]
-    private void SpawnLootClientRpc(Vector3 position, LootType type, int amount, ClientRpcParams clientParams = default)
-    {
-        // Tady se děje magie. Tento kód se provede JEN na klientovi, kterému to patří.
-        
-        GameObject prefabToSpawn = _xpOrbPrefab;
-        if (type == LootType.Gold) prefabToSpawn = _goldPrefab;
-
-        // Instancujeme čistě lokální objekt. Žádný NetworkObject.
-        GameObject orbObj = Instantiate(prefabToSpawn, position, Quaternion.identity);
-        
-        CollectableOrb orbScript = orbObj.GetComponent<CollectableOrb>();
-        if (orbScript != null)
-        {
-            orbScript.Initialize(amount, type);
-        }
-    }
-
-    // --- DEBUGGING (Editor Only) ---
-    private void Update()
-    {
-        if (!IsServer) return;
-
-        // Klávesa 'O' v Editoru spawnne XP pro všechny hráče kolem nich
-        if (Application.isEditor && UnityEngine.InputSystem.Keyboard.current.oKey.wasPressedThisFrame)
-        {
+            // 2. Rozhodneme, komu to padne
+            // V Survivor hrách padá loot buď všem (každý má svůj), nebo jen tomu, kdo zabil.
+            // Zde uděláme variantu: Každý hráč dostane svůj vlastní loot (instanced loot).
+            
             foreach (var client in NetworkManager.Singleton.ConnectedClientsList)
             {
                 if (client.PlayerObject != null)
                 {
-                    // Spawnne 5 orbů kolem hráče
-                    for (int i = 0; i < 5; i++)
+                    // Pošleme RPC konkrétnímu klientovi
+                    ClientRpcParams clientParams = new ClientRpcParams
                     {
-                        Vector3 randomPos = client.PlayerObject.transform.position + UnityEngine.Random.insideUnitSphere * 3f;
-                        randomPos.y = 1f; // Výška nad zemí
-                        SpawnLootForPlayer(client.ClientId, randomPos, LootType.Experience, 10);
-                    }
+                        Send = new ClientRpcSendParams { TargetClientIds = new ulong[] { client.ClientId } }
+                    };
+
+                    SpawnLootClientRpc(position, entry.Type, amount, clientParams);
                 }
             }
-            Debug.Log("Debug Loot Spawned!");
+        }
+    }
+
+    [ClientRpc]
+    private void SpawnLootClientRpc(Vector3 position, LootType type, int amount, ClientRpcParams clientParams = default)
+    {
+        GameObject prefabToSpawn = _xpOrbPrefab;
+        
+        // Výběr prefabu podle typu
+        switch (type)
+        {
+            case LootType.Gold: prefabToSpawn = _goldPrefab; break;
+            case LootType.HealthPotion: prefabToSpawn = _healthPrefab; break;
+        }
+
+        if (prefabToSpawn != null)
+        {
+            // Instancujeme lokální objekt (bez sítě)
+            GameObject orbObj = Instantiate(prefabToSpawn, position, Quaternion.identity);
+            
+            // Inicializace
+            CollectableOrb orbScript = orbObj.GetComponent<CollectableOrb>();
+            if (orbScript != null)
+            {
+                orbScript.Initialize(amount, type);
+            }
         }
     }
 }

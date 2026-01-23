@@ -43,9 +43,9 @@ public class PlayerController : NetworkBehaviour
     [SerializeField] private float _slideSpeed = 10f;
     [SerializeField] private float _slideDuration = 0.8f;
     [SerializeField] private float _slideHeight = 1.0f; // Výška collideru při skluzu
-    [SerializeField] private float _sprintMemoryDuration = 0.5f; 
+    [SerializeField] private float _sprintMemoryDuration = 0.5f;
     private float _lastSprintTime;
-    
+
     private float _originalHeight;
     private Vector3 _originalCenter;
     private bool _isSliding;
@@ -511,17 +511,45 @@ public class PlayerController : NetworkBehaviour
 
     private void OnControllerColliderHit(ControllerColliderHit hit)
     {
-        // Optimalizace: Neřešit kolize s podlahou, jen s objekty do stran
-        if (hit.moveDirection.y < -0.3f) return;
+        // Detekci řešíme jen my sami u své postavy
+        if (!IsOwner) return;
 
-        // Zkusíme najít DestructibleProp na objektu, do kterého jsme narazili
-        if (hit.gameObject.TryGetComponent<DestructibleProp>(out var prop))
+        // 1. Zkusíme najít DestructibleProp na trefeném objektu (nebo jeho rodiči)
+        DestructibleProp prop = hit.gameObject.GetComponent<DestructibleProp>();
+        if (prop == null) prop = hit.gameObject.GetComponentInParent<DestructibleProp>();
+
+        if (prop != null)
         {
-            // Získáme aktuální rychlost hráče (magnitude vektoru velocity z CharacterControlleru)
+            // 2. Vypočítáme sílu nárazu
+            // CharacterController.velocity nám řekne, jak rychle jsme se hýbali v momentě nárazu.
+            // Funguje to pro Dash (vysoká rychlost), Sprint i pád z výšky (Y velocity).
             float impactForce = _controller.velocity.magnitude;
 
-            // Pošleme informaci bedně
-            prop.CheckImpact(impactForce);
+            // 3. Pokud je náraz dost silný (limit má Prop, např. 2.0f), pošleme to serveru.
+            // Optimalizace: RPC voláme jen při silnějším nárazu, abychom nezatěžovali síť, když se o bednu jen opíráme.
+            if (impactForce >= 2.0f)
+            {
+                // Získáme NetworkObject bedny pro identifikaci přes síť
+                if (prop.TryGetComponent<NetworkObject>(out var propNetObj))
+                {
+                    RequestPropImpactServerRpc(propNetObj, impactForce);
+                }
+            }
+        }
+    }
+
+    [ServerRpc]
+    private void RequestPropImpactServerRpc(NetworkObjectReference propRef, float force)
+    {
+        // 4. Server rozbalí referenci ("Kterou bednu jsi trefil?")
+        if (propRef.TryGet(out NetworkObject netObj))
+        {
+            // Najdeme skript a aplikujeme náraz
+            if (netObj.TryGetComponent<DestructibleProp>(out var prop))
+            {
+                // Toto zavolá existující logiku v DestructibleProp, která zkontroluje práh síly a případně bednu zničí
+                prop.CheckImpact(force);
+            }
         }
     }
 
@@ -720,7 +748,7 @@ public class PlayerController : NetworkBehaviour
         // NOVÉ: Zachování hybnosti
         // Pokud sprintuju rychleji než je nastavený slide, použiju svou aktuální rychlost jako startovní.
         float currentSpeed = Velocity.magnitude;
-        float startSlideSpeed = Mathf.Max(_slideSpeed, currentSpeed); 
+        float startSlideSpeed = Mathf.Max(_slideSpeed, currentSpeed);
 
         float timer = 0f;
 

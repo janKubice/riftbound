@@ -24,7 +24,7 @@ public class DestructibleProp : NetworkBehaviour
     [SerializeField] private ParticleSystem _respawnVFX;
 
     [Header("Loot")]
-    [SerializeField] private GameObject _lootPrefab;
+    [SerializeField] private LootTable _lootTable;
     [Range(0f, 1f)][SerializeField] private float _lootChance = 0.3f;
 
     [Header("Audio")]
@@ -70,19 +70,19 @@ public class DestructibleProp : NetworkBehaviour
 
         _isBroken.Value = true;
 
-        if (_lootPrefab != null && Random.value < _lootChance)
+        // --- SPAWN LOOTU ---
+        if (_lootTable != null && LootManager.Instance != null)
         {
-            GameObject loot = Instantiate(_lootPrefab, transform.position + Vector3.up * 0.5f, Quaternion.identity);
-            var netObj = loot.GetComponent<NetworkObject>();
-            if (netObj != null) netObj.Spawn(true);
+            // Náhoda na drop (pokud není v tabulce 100%)
+            if (Random.value < _lootChance)
+            {
+                LootManager.Instance.SpawnLoot(transform.position + Vector3.up * 0.5f, _lootTable);
+            }
         }
+        // -------------------
 
         if (_netAudio != null) _netAudio.PlayOneShotNetworked(_breakSoundIndex);
-
-        if (_respawnTime > 0)
-        {
-            StartCoroutine(RespawnRoutine());
-        }
+        if (_respawnTime > 0) StartCoroutine(RespawnRoutine());
     }
 
     private IEnumerator RespawnRoutine()

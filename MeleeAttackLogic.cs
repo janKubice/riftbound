@@ -65,8 +65,8 @@ public class MeleeAttackLogic : AttackLogic
 
                     entityHit = true;
                 }
-                // B) Zásah Hráče (PvP)
-                else if (hit.TryGetComponent(out PlayerAttributes player))
+
+                if (hit.TryGetComponent(out PlayerAttributes player))
                 {
                     player.TakeDamageServerRpc(finalDamage);
                     entityHit = true;
@@ -81,10 +81,19 @@ public class MeleeAttackLogic : AttackLogic
                     }
                 }
 
-                if (hit.TryGetComponent(out DestructibleProp prop))
+                // --- 1. Zásah Foliage (Listí) ---
+                if (hit.TryGetComponent(out InteractiveFoliage foliage))
+                {
+                    Vector3 dir = (hit.transform.position - origin).normalized;
+                    foliage.OnHit(dir);
+                    // Melee útok listím projde, ale nepočítáme to jako "hitSomething" pro zvuk masivního zásahu
+                }
+
+                // --- 2. Zásah Destructible Prop (Bedna) ---
+                else if (hit.TryGetComponent(out DestructibleProp prop))
                 {
                     prop.TakeHit();
-                    // Můžeš přidat hitSound / impact effect
+                    hitSomething = true;
                 }
 
                 // C) Spawn Hit VFX

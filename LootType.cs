@@ -3,5 +3,7 @@ public enum LootType
     Experience,
     Gold,
     HealthOrb,
-    ManaOrb
+    ManaOrb,
+    HealthPotion,
+    Ammo
 }
