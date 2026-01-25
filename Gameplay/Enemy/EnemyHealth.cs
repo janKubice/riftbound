@@ -4,7 +4,9 @@ using System;
 
 public class EnemyHealth : NetworkBehaviour
 {
+
     [SerializeField] private int _maxHealth = 30;
+    private int _baseMaxHealth;
     [SerializeField] private bool _isTrainingDummy = false;
     private StatusEffectReceiver _statusReceiver;
     public NetworkVariable<int> CurrentHealth = new NetworkVariable<int>(30);
@@ -16,6 +18,7 @@ public class EnemyHealth : NetworkBehaviour
     // Event pro AI Controller (aby věděl, že má zahrát animaci)
     public event Action OnDeath;
     public event Action<int> OnDamageTaken;
+    private EnemyTier _currentTier = EnemyTier.Normal;
 
     [Header("Loot")]
     [SerializeField] private LootTable _lootTable;
@@ -25,6 +28,7 @@ public class EnemyHealth : NetworkBehaviour
     {
         _rb = GetComponent<Rigidbody>();
         _statusReceiver = GetComponent<StatusEffectReceiver>();
+        _baseMaxHealth = _maxHealth;
     }
 
     public override void OnNetworkSpawn()
@@ -34,6 +38,11 @@ public class EnemyHealth : NetworkBehaviour
             // Pokud je to panák, dáme mu hodně HP, aby se UI slider nezbláznil
             CurrentHealth.Value = _isTrainingDummy ? 999999 : _maxHealth;
         }
+    }
+
+    public void SetEnemyTier(EnemyTier tier)
+    {
+        _currentTier = tier;
     }
 
     public void TakeDamage(int amount, ulong attackerId = 9999)
@@ -88,19 +97,57 @@ public class EnemyHealth : NetworkBehaviour
 
     private void Die()
     {
-        // Nezničíme objekt hned, ale řekneme Controlleru "Jsem mrtvý"
         OnDeath?.Invoke();
 
-        if (_lootTable != null && LootManager.Instance != null)
+        // --- UPRAVENÁ LOGIKA LOOTU ---
+        if (IsServer && _lootTable != null && LootManager.Instance != null)
         {
-            // Náhoda na drop (pokud není v tabulce 100%)
-            if (UnityEngine.Random.value < _lootChance)
+            int dropRolls = 1;       // Kolikrát se pokusíme dropnout item
+            float chanceMultiplier = 1.0f; // Zvýšení šance (pro vyšší tiery)
+
+            // Nastavení pravidel podle Tieru
+            switch (_currentTier)
             {
-                LootManager.Instance.SpawnLoot(transform.position + Vector3.up * 0.5f, _lootTable);
+                case EnemyTier.Normal:
+                    dropRolls = 1;
+                    chanceMultiplier = 1.0f;
+                    break;
+                case EnemyTier.Elite:
+                    dropRolls = 2; // Elite zkusí dropnout 2x
+                    chanceMultiplier = 1.2f; // +20% šance
+                    break;
+                case EnemyTier.Champion:
+                    dropRolls = 3;
+                    chanceMultiplier = 1.5f;
+                    break;
+                case EnemyTier.Boss:
+                    dropRolls = 5; // Boss vyhodí hromadu věcí
+                    chanceMultiplier = 10.0f; // Garantovaný drop (pokud base chance není 0)
+                    break;
+            }
+
+            // Smyčka pro dropování
+            for (int i = 0; i < dropRolls; i++)
+            {
+                // Upravená šance
+                float currentChance = _lootChance * chanceMultiplier;
+
+                // Pokud je šance > 1, dropne vždy.
+                if (UnityEngine.Random.value < currentChance)
+                {
+                    // Malý rozptyl pozice, aby itemy nepadly přesně na sebe
+                    Vector3 randomOffset = new Vector3(
+                        UnityEngine.Random.Range(-0.5f, 0.5f),
+                        0.5f,
+                        UnityEngine.Random.Range(-0.5f, 0.5f)
+                    );
+
+                    LootManager.Instance.SpawnLoot(transform.position + randomOffset, _lootTable);
+                }
             }
         }
+        // -----------------------------
 
-        // Vypneme kolize a fyziku, aby do něj hráči nekopali během animace
         if (_rb != null) _rb.isKinematic = true;
         var col = GetComponent<Collider>();
         if (col != null) col.enabled = false;
@@ -123,6 +170,23 @@ public class EnemyHealth : NetworkBehaviour
     // Tuto metodu zavolá AI Controller až skončí animace smrti
     public void DestroySelf()
     {
-        if (IsServer) gameObject.NetDestroy();
+        if (!IsServer) return;
+
+        // PŮVODNĚ: gameObject.NetDestroy();
+
+        // NOVĚ: Vrátíme objekt do Poolu
+        var netObj = GetComponent<NetworkObject>();
+
+        if (netObj != null && netObj.IsSpawned)
+        {
+            // Parametr 'true' normálně ničí objekt, ale díky našemu Handleru
+            // ho to pouze vypne a vrátí do PoolManagera.
+            netObj.Despawn(true);
+        }
+        else
+        {
+            // Fallback pro případ, že testuješ offline bez sítě
+            Destroy(gameObject);
+        }
     }
 }

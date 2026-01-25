@@ -47,6 +47,11 @@ public class DialogueManager : MonoBehaviour
         Cursor.lockState = CursorLockMode.None;
         Cursor.visible = true;
 
+        if (_currentNpc != null)
+        {
+            _currentNpc.SetNameTagVisibility(false);
+        }
+
         DisplayNode(rootNode);
     }
 
@@ -54,6 +59,11 @@ public class DialogueManager : MonoBehaviour
     {
         _dialoguePanel.SetActive(false);
         _currentNpc = null;
+
+        if (_currentNpc != null)
+        {
+            _currentNpc.SetNameTagVisibility(true);
+        }
 
         // Zamkneme myš zpět (pokud nejsme v Shopu)
         // Pokud se přechází do Shopu, ShopManager si myš ohlídá sám.

@@ -8,6 +8,9 @@ public class EnemySpawnPoint : MonoBehaviour
     [Tooltip("Radius v jakém se mobové spawnují kolem tohoto bodu.")]
     public float SpawnRadius = 5.0f;
 
+    void OnEnable() { if(DirectorSpawner.Instance) DirectorSpawner.Instance.RegisterSpawnPoint(this); }
+    void OnDisable() { if(DirectorSpawner.Instance) DirectorSpawner.Instance.UnregisterSpawnPoint(this); }
+
     private void OnDrawGizmos()
     {
         Gizmos.color = Color.red;

@@ -1,6 +1,5 @@
 using UnityEngine;
 using Unity.Netcode;
-using System.Collections;
 using System.Collections.Generic;
 using System.Linq;
 
@@ -8,148 +7,296 @@ public class DirectorSpawner : NetworkBehaviour
 {
     public static DirectorSpawner Instance { get; private set; }
 
-    [Header("Databáze Nepřátel")]
+    [Header("Enemy Database")]
     [SerializeField] private List<EnemyDefinition> _allEnemies;
 
     [Header("Game Pace")]
-    [SerializeField] private float _creditsPerSecond = 1.0f;     // Základní přísun kreditů
-    [SerializeField] private float _difficultyScaling = 0.1f;    // Jak rychle hra těžkne (za sekundu)
-    [SerializeField] private int _maxEnemiesAlive = 50;
+    [SerializeField] private float _baseCreditsPerSecond = 1.0f;
+    [SerializeField] private float _difficultyScaling = 0.1f;
+    [SerializeField] private int _maxEnemiesAlive = 200;
 
-    [Header("Tier Chances (Base)")]
-    [Range(0,1)] [SerializeField] private float _eliteChance = 0.1f;
-    [Range(0,1)] [SerializeField] private float _championChance = 0.02f;
+    [Header("Performance Limits")]
+    [Tooltip("Maximální počet spawnu za jeden frame (brání zásekům).")]
+    [SerializeField] private int _maxSpawnsPerFrame = 2;
 
-    private float _currentCredits = 0;
+    [Header("Safe Zone")]
+    [SerializeField] private float _safeZoneRadius = 15.0f;
+    [SerializeField] private bool _canPauseGame = false;
+    [SerializeField] private float _checkPlayersInterval = 1.0f; // Kontrola hráčů jen 1x za sekundu
+
+    [Header("Tiers")]
+    [Range(0, 1)][SerializeField] private float _eliteChance = 0.1f;
+    [Range(0, 1)][SerializeField] private float _championChance = 0.02f;
+
+    // Runtime stav
+    private float _accumulatedCredits = 0;
     private float _gameTime = 0;
     private float _difficultyMultiplier = 1.0f;
-    
-    private List<EnemySpawnPoint> _spawnPoints = new List<EnemySpawnPoint>();
-    private int _enemiesAlive = 0;
+    private bool _hasGameStarted = false;
+    private float _lastPlayerCheckTime;
+    private bool _arePlayersActive = false;
 
-    private void Awake() 
-    { 
-        Instance = this; 
+    // Kolekce
+    private HashSet<EnemySpawnPoint> _spawnPoints = new HashSet<EnemySpawnPoint>();
+    private List<EnemySpawnPoint> _validPointsBuffer = new List<EnemySpawnPoint>(50);
+
+    // Čítač živých (lepší než hledat objekty)
+    private NetworkVariable<int> _enemiesAliveNetVar = new NetworkVariable<int>(0);
+
+    private void Awake()
+    {
+        if (Instance != null && Instance != this)
+        {
+            Destroy(gameObject);
+            return;
+        }
+        Instance = this;
     }
+
+    // --- Registrace SpawnPointů (Volají samy SpawnPointy v Start) ---
+    public void RegisterSpawnPoint(EnemySpawnPoint sp) => _spawnPoints.Add(sp);
+    public void UnregisterSpawnPoint(EnemySpawnPoint sp) => _spawnPoints.Remove(sp);
 
     public override void OnNetworkSpawn()
     {
         if (IsServer)
         {
-            // Najde všechny spawnpointy ve scéně
-            _spawnPoints = FindObjectsByType<EnemySpawnPoint>(FindObjectsSortMode.None).ToList();
-            StartCoroutine(DirectorLoop());
+            _enemiesAliveNetVar.Value = 0;
+            _allEnemies = _allEnemies.OrderBy(x => x.Cost).ToList();
+
+            var existingPoints = FindObjectsByType<EnemySpawnPoint>(FindObjectsSortMode.None);
+            foreach (var point in existingPoints)
+            {
+                RegisterSpawnPoint(point);
+            }
+            // -------------------------------------------------------------
         }
     }
 
     public void EnemyDied()
     {
-        if(IsServer) _enemiesAlive--;
-    }
-
-    private IEnumerator DirectorLoop()
-    {
-        yield return new WaitForSeconds(2.0f); // Start delay
-
-        while (true)
+        if (IsServer)
         {
-            // 1. Zvyšování obtížnosti a kreditů
-            _gameTime += 1.0f;
-            _difficultyMultiplier = 1.0f + (_gameTime * _difficultyScaling / 60f); // Každou minutu těžší
-            
-            // Přičteme kredity (násobeno obtížností)
-            _currentCredits += _creditsPerSecond * _difficultyMultiplier;
-
-            // 2. Kontrola limitu nepřátel
-            if (_enemiesAlive < _maxEnemiesAlive)
-            {
-                TrySpawnEnemies();
-            }
-
-            // Loop běží každou sekundu
-            yield return new WaitForSeconds(1.0f);
+            _enemiesAliveNetVar.Value = Mathf.Max(0, _enemiesAliveNetVar.Value - 1);
         }
     }
 
-    private void TrySpawnEnemies()
+    private void Update()
     {
-        // Dokud máme kredity, nakupujeme
-        int attempts = 0;
-        while (_currentCredits > 0 && _enemiesAlive < _maxEnemiesAlive && attempts < 10)
+        if (!IsServer) return;
+
+        // 1. Logika Safe Zóny (Throttled check)
+        if (Time.time >= _lastPlayerCheckTime + _checkPlayersInterval)
         {
-            attempts++;
+            _lastPlayerCheckTime = Time.time;
+            _arePlayersActive = CheckIfPlayersAreActive();
 
-            // A) Vyber SpawnPoint (blízko nějakého hráče)
-            EnemySpawnPoint spawnPoint = GetSmartSpawnPoint();
-            if (spawnPoint == null) break;
+            if (!_hasGameStarted && _arePlayersActive) _hasGameStarted = true;
+        }
 
-            // B) Vyber Nepřítele podle Rarity
-            EnemyDefinition enemyDef = PickRandomEnemy();
-            if (enemyDef == null) break;
+        // Pokud hra stojí, nic neděláme
+        if (!_hasGameStarted) return;
+        if (_canPauseGame && !_arePlayersActive) return;
 
-            // Máme na něj?
-            if (_currentCredits >= enemyDef.Cost)
+        // 2. Progrese Hry
+        float dt = Time.deltaTime;
+        _gameTime += dt;
+
+        // Vzorec: Obtížnost roste s časem
+        _difficultyMultiplier = 1.0f + (_gameTime * _difficultyScaling / 60f);
+
+        // Přísun kreditů
+        _accumulatedCredits += _baseCreditsPerSecond * _difficultyMultiplier * dt;
+
+        // 3. Spawnování (Rozložené v čase)
+        ProcessSpawnQueue();
+    }
+
+    private void ProcessSpawnQueue()
+    {
+        // Pokud máme dost nepřátel, šetříme kredity (nebo je můžeme zastropovat)
+        if (_enemiesAliveNetVar.Value >= _maxEnemiesAlive) return;
+
+        int spawnsThisFrame = 0;
+
+        // "While" je zde bezpečné, protože je omezeno _maxSpawnsPerFrame (např. 2)
+        // Nikdy nezasekne hru na více než pár milisekund.
+        while (_accumulatedCredits > 0 &&
+               spawnsThisFrame < _maxSpawnsPerFrame &&
+               _enemiesAliveNetVar.Value < _maxEnemiesAlive)
+        {
+            // Zkusíme vybrat nepřítele, na kterého máme
+            EnemyDefinition enemyToSpawn = PickAffordableEnemy(_accumulatedCredits);
+
+            // Pokud nemáme ani na nejlevnějšího, končíme pro tento frame a šetříme dál
+            if (enemyToSpawn == null) break;
+
+            EnemySpawnPoint sp = GetSmartSpawnPoint();
+            if (sp == null) break; // Není kde spawnovat
+
+            // Kalkulace Tieru
+            EnemyTier tier = CalculateTier(sp.ZoneDifficulty);
+            float tierMult = GetTierMultiplier(tier);
+            float finalCost = enemyToSpawn.Cost * tierMult;
+
+            // Double check ceny (kvůli tieru)
+            if (_accumulatedCredits >= finalCost)
             {
-                // C) Urči Tier (Kvalitu)
-                EnemyTier tier = CalculateTier(spawnPoint.ZoneDifficulty);
-                float tierCostMultiplier = GetTierMultiplier(tier);
-                
-                // Finální cena (Mocný mob stojí víc)
-                float finalCost = enemyDef.Cost * tierCostMultiplier;
-
-                if (_currentCredits >= finalCost)
-                {
-                    // SPAWN!
-                    SpawnEnemy(enemyDef, tier, spawnPoint);
-                    _currentCredits -= finalCost;
-                }
+                SpawnEnemy(enemyToSpawn, tier, sp);
+                _accumulatedCredits -= finalCost;
+                spawnsThisFrame++;
+            }
+            else
+            {
+                // Máme na základní verzi, ale ne na Elite verzi. 
+                // Buď přeskočíme, nebo spawneme Normal verzi. Zde počkáme na víc kreditů.
+                break;
             }
         }
+    }
+
+    // Optimalizovaný výběr nepřítele (nevybíráme to, na co nemáme)
+    private EnemyDefinition PickAffordableEnemy(float budget)
+    {
+        // _allEnemies je seřazený podle ceny.
+        // Najdeme všechny, které si můžeme dovolit.
+        var affordable = _allEnemies.Where(e => e.Cost <= budget).ToList();
+
+        if (affordable.Count == 0) return null;
+
+        // Z těch dostupných vybereme váženým náhodným výběrem
+        return WeightedRandomPick(affordable);
+    }
+
+    private EnemyDefinition WeightedRandomPick(List<EnemyDefinition> candidates)
+    {
+        int totalWeight = candidates.Sum(e => (int)e.Rarity);
+        int roll = Random.Range(0, totalWeight);
+        int current = 0;
+
+        foreach (var e in candidates)
+        {
+            current += (int)e.Rarity;
+            if (roll < current) return e;
+        }
+        return candidates[0];
     }
 
     private void SpawnEnemy(EnemyDefinition def, EnemyTier tier, EnemySpawnPoint sp)
     {
-        // Náhodná pozice v okruhu spawnpointu
         Vector2 circle = Random.insideUnitCircle * sp.SpawnRadius;
         Vector3 pos = sp.transform.position + new Vector3(circle.x, 0, circle.y);
-        
-        // Raycast na zem
+
+        // Raycast pro usazení na zem
         if (Physics.Raycast(pos + Vector3.up * 10, Vector3.down, out RaycastHit hit, 20f, LayerMask.GetMask("Default", "Terrain")))
         {
             pos = hit.point;
         }
 
-        GameObject go = Instantiate(def.Prefab, pos, Quaternion.identity);
-        go.GetComponent<NetworkObject>().Spawn(true);
+        // --- POOLING SYSTEM ---
+        NetworkObject netObj = null;
 
-        // Aplikace Statů
-        if (go.TryGetComponent(out EnemyBaseAI ai))
+        if (NetworkObjectPool.Instance != null)
         {
-            float multi = GetTierMultiplier(tier);
-            
-            // Kalkulace statů: Base * Tier Multi * Global Difficulty
-            int hp = Mathf.RoundToInt(def.BaseHealth * multi * _difficultyMultiplier);
-            int dmg = Mathf.RoundToInt(def.BaseDamage * multi * _difficultyMultiplier);
-            float speed = def.BaseSpeed * (1 + (multi * 0.1f)); // Speed roste pomaleji
-            float scale = 1.0f + (multi * 0.2f); // Boss je větší
-
-            ai.InitializeEnemy(tier, hp, dmg, speed, scale);
+            netObj = NetworkObjectPool.Instance.GetNetworkObject(def.Prefab, pos, Quaternion.identity);
+        }
+        else
+        {
+            // Fallback (Varování v konzoli by bylo vhodné)
+            var go = Instantiate(def.Prefab, pos, Quaternion.identity);
+            netObj = go.GetComponent<NetworkObject>();
         }
 
-        _enemiesAlive++;
+        if (netObj != null)
+        {
+            if (!netObj.IsSpawned) netObj.Spawn(true);
+
+            // Inicializace AI
+            if (netObj.TryGetComponent(out EnemyBaseAI ai))
+            {
+                float tierMulti = GetTierMultiplier(tier);
+                // Vzorec pro staty
+                float totalStatMultiplier = tierMulti * _difficultyMultiplier;
+
+                int hp = Mathf.RoundToInt(def.BaseHealth * totalStatMultiplier);
+                int dmg = Mathf.RoundToInt(def.BaseDamage * totalStatMultiplier);
+
+                // Speed škálujeme méně agresivně
+                float speed = def.BaseSpeed * (1 + (tierMulti * 0.1f)) * (1 + (_gameTime * 0.001f)); // Velmi pomalý nárůst rychlosti časem
+                float scale = 1.0f + (tierMulti * 0.15f);
+
+                ai.InitializeEnemy(tier, hp, dmg, speed, scale, tier, pos);
+            }
+
+            _enemiesAliveNetVar.Value++;
+        }
     }
 
-    // --- LOGIKA VÝBĚRU ---
+    // --- UTILITIES ---
+
+    private bool CheckIfPlayersAreActive()
+    {
+        if (NetworkManager.Singleton.ConnectedClientsList.Count == 0) return false;
+
+        // Optimalizace: Použití sqrMagnitude
+        float sqrRadius = _safeZoneRadius * _safeZoneRadius;
+
+        foreach (var client in NetworkManager.Singleton.ConnectedClientsList)
+        {
+            if (client.PlayerObject != null)
+            {
+                float sqrDist = (transform.position - client.PlayerObject.transform.position).sqrMagnitude;
+                if (sqrDist > sqrRadius) return true; // Hráč je venku
+            }
+        }
+        return false;
+    }
+
+    private EnemySpawnPoint GetSmartSpawnPoint()
+    {
+        if (NetworkManager.Singleton.ConnectedClientsList.Count == 0) return null;
+        if (_spawnPoints.Count == 0) return null;
+
+        // Náhodný hráč
+        var clients = NetworkManager.Singleton.ConnectedClientsList;
+        var playerObj = clients[Random.Range(0, clients.Count)].PlayerObject;
+
+        if (playerObj == null) return null;
+        Vector3 playerPos = playerObj.transform.position;
+
+        _validPointsBuffer.Clear();
+
+        // Jednoduchá filtrace vzdálenosti (15m - 50m)
+        float minDstSqr = 225f; // 15^2
+        float maxDstSqr = 2500f; // 50^2
+
+        foreach (var sp in _spawnPoints)
+        {
+            // Ignorujeme vypnuté body
+            if (!sp.gameObject.activeSelf) continue;
+
+            float distSqr = (sp.transform.position - playerPos).sqrMagnitude;
+            if (distSqr > minDstSqr && distSqr < maxDstSqr)
+            {
+                _validPointsBuffer.Add(sp);
+            }
+        }
+
+        if (_validPointsBuffer.Count > 0)
+        {
+            return _validPointsBuffer[Random.Range(0, _validPointsBuffer.Count)];
+        }
+
+        // Fallback: Pokud není nic v ideální vzdálenosti, vezmi jakýkoliv aktivní
+        return _spawnPoints.FirstOrDefault();
+    }
 
     private EnemyTier CalculateTier(float zoneDifficulty)
     {
-        // Čím vyšší zoneDifficulty, tím větší šance na Elite
         float roll = Random.value;
-        float difficultyMod = zoneDifficulty * 0.1f; // Třeba
-
-        if (roll < _championChance * difficultyMod) return EnemyTier.Boss;
-        if (roll < _eliteChance * difficultyMod) return EnemyTier.Elite;
-        
+        // Příklad: zoneDiff 1.0 = normal, zoneDiff 2.0 = double chance
+        if (roll < _championChance * zoneDifficulty) return EnemyTier.Boss;
+        if (roll < _eliteChance * zoneDifficulty) return EnemyTier.Elite;
         return EnemyTier.Normal;
     }
 
@@ -157,48 +304,28 @@ public class DirectorSpawner : NetworkBehaviour
     {
         switch (tier)
         {
-            case EnemyTier.Elite: return 2.0f;
-            case EnemyTier.Champion: return 5.0f;
-            case EnemyTier.Boss: return 20.0f;
+            case EnemyTier.Elite: return 2.5f;
+            case EnemyTier.Champion: return 6.0f;
+            case EnemyTier.Boss: return 25.0f;
             default: return 1.0f;
         }
     }
 
-    private EnemyDefinition PickRandomEnemy()
+    private void OnGUI()
     {
-        // Vážený výběr (Weighted Random)
-        int totalWeight = 0;
-        foreach (var e in _allEnemies) totalWeight += (int)e.Rarity;
+        if (!IsServer) return;
 
-        int roll = Random.Range(0, totalWeight);
-        int current = 0;
+        GUILayout.BeginArea(new Rect(10, 10, 300, 500));
+        GUILayout.Box("DIRECTOR DEBUG");
+        GUILayout.Label($"State: {(_hasGameStarted ? "RUNNING" : "WAITING FOR PLAYER MOVE")}");
+        GUILayout.Label($"Credits: {_accumulatedCredits:F1}");
+        GUILayout.Label($"Alive: {_enemiesAliveNetVar.Value}/{_maxEnemiesAlive}");
+        GUILayout.Label($"Registered SpawnPoints: {_spawnPoints.Count}");
 
-        foreach (var e in _allEnemies)
+        if (!_hasGameStarted)
         {
-            current += (int)e.Rarity;
-            if (roll < current) return e;
+            GUILayout.Label("MOVE AWAY FROM CENTER TO START!");
         }
-        return _allEnemies[0];
-    }
-
-    private EnemySpawnPoint GetSmartSpawnPoint()
-    {
-        // Najdi náhodného hráče
-        var clients = NetworkManager.Singleton.ConnectedClientsList;
-        if (clients.Count == 0) return null;
-        var player = clients[Random.Range(0, clients.Count)].PlayerObject;
-        if (player == null) return null;
-
-        // Najdi spawnpointy v okolí (ne moc blízko, ne moc daleko)
-        // Optimalizace: V reálu použít prostorové dělení, zde Linq
-        var validPoints = _spawnPoints
-            .Where(sp => {
-                float d = Vector3.Distance(sp.transform.position, player.transform.position);
-                return d > 10f && d < 60f; // Spawnuj jen 10-60m od hráče
-            })
-            .ToList();
-
-        if (validPoints.Count == 0) return null;
-        return validPoints[Random.Range(0, validPoints.Count)];
+        GUILayout.EndArea();
     }
 }

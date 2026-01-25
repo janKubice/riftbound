@@ -251,6 +251,45 @@ public class PlayerController : NetworkBehaviour
     {
         if (!IsOwner) return;
 
+        // --- 1. KONTROLA UI / KURZORU ---
+        // Pokud je kurzor viditelný (hráč je v menu, obchodu nebo dialogu),
+        // zakážeme ovládání, ale necháme běžet fyziku.
+        bool isInputBlocked = Cursor.lockState != CursorLockMode.Locked;
+
+        if (_isInShopMode)
+        {
+            // Cílová výška = zem + 2 metry
+            float targetY = _shopGroundY + _levitationHeight;
+
+            // Plynulý přesun (Lerp) aktuální výšky směrem k cíli
+            // Používáme Move(), aby CharacterController respektoval kolize (pro jistotu)
+            float nextY = Mathf.Lerp(transform.position.y, targetY, Time.deltaTime * _levitationSpeed);
+            float diff = nextY - transform.position.y;
+
+            _controller.Move(Vector3.up * diff);
+
+            // Stále posíláme animace (že stojíme/levitujeme), aby se neasekly
+            HandleAnimation();
+            return; // Ukončíme Update, aby se nepočítala gravitace a WASD
+        }
+
+        if (isInputBlocked)
+        {
+            // Vynulujeme vstupy, aby se postava zasekla v pohybu
+            _moveInput = Vector2.zero;
+            _isFireInputHeld = false;
+            _isSprinting = false;
+
+            // Aplikujeme pouze gravitaci
+            HandleGravity();
+            _controller.Move(new Vector3(0, _playerVelocity.y, 0) * Time.deltaTime);
+
+            // Aktualizujeme animace (aby přešla do Idle)
+            HandleAnimation();
+
+            return; // Dál nepokračujeme (žádná rotace, žádný skok)
+        }
+
         // 1. KONTROLA STUNU (Hard CC)
         // Pokud jsme omráčení, nesmíme nic dělat
         if (_statusReceiver != null && _statusReceiver.IsStunned)
@@ -275,22 +314,7 @@ public class PlayerController : NetworkBehaviour
             return;
         }
 
-        if (_isInShopMode)
-        {
-            // Cílová výška = zem + 2 metry
-            float targetY = _shopGroundY + _levitationHeight;
 
-            // Plynulý přesun (Lerp) aktuální výšky směrem k cíli
-            // Používáme Move(), aby CharacterController respektoval kolize (pro jistotu)
-            float nextY = Mathf.Lerp(transform.position.y, targetY, Time.deltaTime * _levitationSpeed);
-            float diff = nextY - transform.position.y;
-
-            _controller.Move(Vector3.up * diff);
-
-            // Stále posíláme animace (že stojíme/levitujeme), aby se neasekly
-            HandleAnimation();
-            return; // Ukončíme Update, aby se nepočítala gravitace a WASD
-        }
 
         if (_isSliding)
         {

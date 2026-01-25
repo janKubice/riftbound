@@ -15,6 +15,10 @@ public class NPCInteractable : NetworkBehaviour, IInteractable
     [Tooltip("Indexy zbraní z WeaponManageru, které toto NPC prodává (např. 0, 1, 3)")]
     public List<int> WeaponIndexesForSale;
 
+    [Header("Visuals")]
+    [Tooltip("Přetáhněte sem Canvas/Text objekt, který visí nad hlavou NPC.")]
+    [SerializeField] private GameObject _worldNameTag;
+
     private Transform _playerTransform;
 
     public string InteractionPrompt => $"E - Talk to {_npcName}";
@@ -67,6 +71,14 @@ public class NPCInteractable : NetworkBehaviour, IInteractable
     {
         // Tady řekneme konkrétnímu klientovi: "Otevři si dialog"
         OpenDialogueClientRpc(clientId);
+    }
+
+    public void SetNameTagVisibility(bool isVisible)
+    {
+        if (_worldNameTag != null)
+        {
+            _worldNameTag.SetActive(isVisible);
+        }
     }
 
     // 3. Klient dostane rozkaz: "Otevři UI"

@@ -75,6 +75,15 @@ public class PlayerInteractor : NetworkBehaviour
 
     void Update()
     {
+        if (Cursor.lockState != CursorLockMode.Locked)
+        {
+            if (_interactionPromptUI != null && _interactionPromptUI.gameObject.activeSelf)
+            {
+                _interactionPromptUI.gameObject.SetActive(false);
+            }
+            return; // Ukončíme Update, takže FindInteractable se vůbec nezavolá
+        }
+
         // Pokud UI ještě není nalezeno, zkusíme to znovu
         if (!_isUiReady)
         {
