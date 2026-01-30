@@ -16,6 +16,7 @@ public class UpgradeSlotUI : MonoBehaviour
     [Header("Barvy")]
     [SerializeField] private Color _affordableColor = Color.green;
     [SerializeField] private Color _tooExpensiveColor = Color.red;
+    [SerializeField] private Color _maxedColor = Color.gray; 
 
     private int _upgradeIndex;
     private PlayerProgression _playerProgression;
@@ -44,31 +45,56 @@ public class UpgradeSlotUI : MonoBehaviour
 
     public void Refresh()
     {
-        if (_playerProgression == null) return;
+        if (_playerProgression == null || _data == null) return;
 
-        // Získání aktuálních dat
+        // 1. Získání dat
         int currentLevel = _playerProgression.GetUpgradeLevel(_upgradeIndex);
-        int currentCost = _data.GetCost(currentLevel);
         int playerXP = _playerProgression.CurrentXP.Value;
-        float currentBonus = _data.GetTotalBonus(currentLevel);
+        bool isMaxed = _data.IsMaxLevel(currentLevel);
 
-        // Aktualizace Textů
-        _levelText.text = $"Lvl {currentLevel}";
-        _costText.text = $"{currentCost} XP";
-        
-        // Zobrazíme, co ten stat aktuálně dává (např. Speed: +2.5)
-        _valueText.text = $"Bonus: +{currentBonus:F1}";
+        // 2. Aktualizace Levelu
+        _levelText.text = isMaxed ? "MAX" : $"Lvl {currentLevel}";
 
-        // Logika Tlačítka (Máme na to?)
-        bool canAfford = playerXP >= currentCost;
-        _buyButton.interactable = canAfford;
-        _costText.color = canAfford ? _affordableColor : _tooExpensiveColor;
+        // 3. Aktualizace Bonusu (použijeme novou metodu z Data)
+        // Zobrazí např.: "Bonus: 10 -> 15"
+        _valueText.text = _data.GetValuePreview(currentLevel);
+
+        // 4. Logika Tlačítka a Ceny
+        if (isMaxed)
+        {
+            // STAV: MAXIMÁLNÍ LEVEL
+            _costText.text = "---";
+            _costText.color = _maxedColor;
+            _buyButton.interactable = false;
+            
+            // Volitelně: změnit pozadí tlačítka na šedou
+            if (_buttonBackground != null) _buttonBackground.color = Color.gray;
+        }
+        else
+        {
+            // STAV: LZE UPGRADOVAT
+            int currentCost = _data.GetCost(currentLevel);
+            _costText.text = $"{currentCost} XP";
+            
+            bool canAfford = playerXP >= currentCost;
+            
+            // Tlačítko je aktivní jen pokud máme dost XP
+            _buyButton.interactable = canAfford;
+            
+            // Barva textu podle ceny
+            _costText.color = canAfford ? _affordableColor : _tooExpensiveColor;
+
+            // Reset barvy pozadí (pokud jsme ji měnili u MAX)
+            if (_buttonBackground != null) _buttonBackground.color = Color.white;
+        }
     }
 
     private void OnBuyClicked()
     {
-        Debug.Log("Buying: " + _nameText);
+        int currentLevel = _playerProgression.GetUpgradeLevel(_upgradeIndex);
+        if (_data.IsMaxLevel(currentLevel)) return;
+
+        Debug.Log($"[UpgradeSlot] Buying: {_data.UpgradeName}");
         _playerProgression.TryBuyUpgrade(_upgradeIndex);
-        // UI se refreshne automaticky přes eventy v Shop Manageru
     }
 }

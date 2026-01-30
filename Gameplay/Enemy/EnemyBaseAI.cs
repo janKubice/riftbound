@@ -12,10 +12,13 @@ public abstract class EnemyBaseAI : NetworkBehaviour
     [SerializeField] protected float _aggroRange = 10000f;
     [SerializeField] protected float _rotationSpeed = 720f;
     [SerializeField] protected float _spawnDuration = 0.1f; // Kratší spawn, když není animace
-
+    [SerializeField] protected EnemyTier _tier = EnemyTier.Normal;
     protected int _baseDamage;
     protected int _currentDamage;
     protected float _currentSpeed;
+    protected float _currentAttackRate = 1.0f;     // Útoky za sekundu
+    protected float _knockbackResistance = 0f;     // 0 = plný odlet, 1 = ani se nehne
+    protected int _xpReward = 0;
 
     [Header("References")]
     // ZMĚNA: Není povinné, může zůstat prázdné
@@ -32,8 +35,13 @@ public abstract class EnemyBaseAI : NetworkBehaviour
     private float _currentPathUpdateInterval = 0.2f;
     private Vector3 _lastPos;
 
-    [Header("Base Settings")]
-    [SerializeField] protected EnemyTier _tier = EnemyTier.Normal;
+    [Header("Visuals")]
+    // Pokud máš model jako dítě objektu, přiřaď ho sem v Inspectoru nebo ho najdeme v Awake
+    [SerializeField] protected Renderer _modelRenderer; 
+    
+    // Optimalizace: Umožňuje měnit barvu bez duplikace materiálu (Draw Call Batching)
+    private MaterialPropertyBlock _propBlock;
+
 
     protected virtual void Awake()
     {
@@ -46,6 +54,13 @@ public abstract class EnemyBaseAI : NetworkBehaviour
             _agent.angularSpeed = 720f; // Rychlé otáčení agenta (pokud ho řídí NavMesh)
             _agent.autoBraking = false; // Nezastavovat před cílem, pokud to neřídíme manuálně
             _agent.obstacleAvoidanceType = ObstacleAvoidanceType.NoObstacleAvoidance; // Pro hordy entit šetří CPU
+        }
+
+        _propBlock = new MaterialPropertyBlock();
+
+        if (_modelRenderer == null)
+        {
+            _modelRenderer = GetComponentInChildren<Renderer>();
         }
     }
 
@@ -171,37 +186,78 @@ public abstract class EnemyBaseAI : NetworkBehaviour
         _lastPos = transform.position;
     }
 
-    public virtual void InitializeEnemy(EnemyTier tier, int hp, int damage, float speed, float scaleMultiplier, EnemyTier enemyTier, Vector3 pos)
+    public virtual void InitializeEnemy(
+        EnemyTier tier, int hp, int damage, float speed, float scaleMultiplier, float attackRate, float knockbackResistance, int xp, Vector3 pos)
     {
-
-
-        // 1. Nastavíme staty
+        // 1. Nastavení základních statů
+        _tier = tier;
         _currentDamage = damage;
         _currentSpeed = speed;
-        _tier = enemyTier;
-        if (_agent) _agent.speed = speed;
+        _currentAttackRate = attackRate;
+        _knockbackResistance = knockbackResistance;
+        _xpReward = xp;
 
-        // 2. Nastavíme HP přes komponentu Health
-        if (_health) _health.InitializeHealth(hp);
+        // Aplikace rychlosti na Agenta
+        if (_agent != null)
+        {
+            _agent.speed = speed;
+            // Volitelně: Těžší nepřátelé se otáčejí pomaleji
+            // _agent.angularSpeed = 720f * (1f - (knockbackResistance * 0.5f)); 
+        }
 
-        // 3. Vizuální změna podle Tieru (Zvětšení modelu)
+        // 2. Nastavení HP (přes Health komponentu)
+        if (_health != null)
+        {
+            _health.InitializeHealth(hp);
+            // Pokud má Health komponenta metodu pro nastavení tieru/XP, zavolejte ji zde
+            // _health.SetReward(xp); 
+        }
+
+        // 3. Vizuální změna (Server side)
         transform.localScale = Vector3.one * scaleMultiplier;
 
-        // 4. (Volitelné) Změna barvy nebo materiálu podle Tieru
-        // Zde bys mohl měnit barvu očí nebo texturu, aby hráč poznal Elite moba.
+        // 4. Synchronizace vizuálu na klienty
         SetEnemyVisualsClientRpc(scaleMultiplier, tier);
+
+        // 5. Warp na startovní pozici
         WarpAgentToPosition(pos);
     }
 
     [ClientRpc]
     private void SetEnemyVisualsClientRpc(float scale, EnemyTier tier)
     {
-        // Toto se provede na VŠECH klientech (včetně hosta)
+        // 1. Změna velikosti (Scale)
         transform.localScale = Vector3.one * scale;
 
-        // Zde můžeš přidat i změnu materiálu pro Elite/Boss, aby to viděli všichni
-        // např:
-        // if (tier == EnemyTier.Elite) _myRenderer.material.color = Color.red;
+        // 2. Změna barvy (pomocí MaterialPropertyBlock pro výkon)
+        if (_modelRenderer != null)
+        {
+            // Načteme aktuální vlastnosti (abychom nepřepsali jiné věci)
+            _modelRenderer.GetPropertyBlock(_propBlock);
+
+            Color targetColor = Color.white; // Default (Normal)
+
+            switch (tier)
+            {
+                case EnemyTier.Elite:
+                    targetColor = new Color(1f, 0.8f, 0.2f); // Zlatá/Oranžová
+                    break;
+                case EnemyTier.Boss:
+                    targetColor = new Color(1f, 0.3f, 0.3f); // Červená
+                    break;
+                // Normal zůstává bílý (nezměněná textura)
+            }
+
+            // Nastavíme barvu. 
+            // "_BaseColor" je standard pro URP. 
+            // "_Color" je standard pro Built-in pipeline.
+            // Pro jistotu zkusíme nastavit oboje, nebo si vyber podle tvého render pipeline.
+            _propBlock.SetColor("_BaseColor", targetColor); 
+            _propBlock.SetColor("_Color", targetColor);
+
+            // Aplikujeme zpět na renderer
+            _modelRenderer.SetPropertyBlock(_propBlock);
+        }
     }
 
     public void SetTier(EnemyTier tier)
@@ -302,13 +358,32 @@ public abstract class EnemyBaseAI : NetworkBehaviour
 
     protected virtual void HandleDamage(int damage)
     {
+        // Vypočítáme šanci na "odolání" knockbacku
+        // Pokud je Resistance 1.0, podmínka (1f >= 1f) je pravdivá -> return (žádný knockback)
+        // Pokud je Resistance 0.0, podmínka (0f > Random) -> malá šance, většinou projde
+
+        // Varianta A: Knockback se vůbec nestane (Hard resist)
+        if (_knockbackResistance >= 1.0f) return;
+
+        // Varianta B: Náhodná šance na odolání (Soft resist)
+        // Např. s rezistencí 0.7 má 70% šanci, že se nepohne
+        if (Random.value < _knockbackResistance) return;
+
+        // Pokud prošlo, spustíme rutinu
+        // (Volitelně můžete délku knockbacku zkrátit podle rezistence)
         StartCoroutine(KnockbackRoutine());
     }
 
     private IEnumerator KnockbackRoutine()
     {
         if (_agent.enabled) _agent.enabled = false;
-        yield return new WaitForSeconds(0.2f);
+
+        // Délka stun efektu zmenšená o rezistenci (min 0.05s)
+        float duration = 0.2f * (1.0f - _knockbackResistance);
+        if (duration < 0.05f) duration = 0.05f;
+
+        yield return new WaitForSeconds(duration);
+
         if (_health.CurrentHealth.Value > 0 && _agent != null)
         {
             _agent.enabled = true;

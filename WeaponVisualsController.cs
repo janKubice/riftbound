@@ -4,9 +4,12 @@ using System.Collections.Generic;
 public class WeaponVisualsController : MonoBehaviour
 {
     private List<PooledVFX> _vfxPool = new List<PooledVFX>();
-    
+
     private GameObject _currentVfxPrefab;
     private Transform _currentSpawnPoint;
+
+    private LaserBeamVFX _activeLaserInstance;
+    private bool _isLaserWeapon;
 
     public void InitializeWeapon(WeaponData data, GameObject weaponInstance)
     {
@@ -16,10 +19,11 @@ public class WeaponVisualsController : MonoBehaviour
             if (item.Root != null) Destroy(item.Root);
         }
         _vfxPool.Clear();
-
+        if (_activeLaserInstance != null) Destroy(_activeLaserInstance.gameObject);
+        _isLaserWeapon = data.IsContinuous;
         // 2. Nastavení referencí pro nový typ zbraně
         _currentVfxPrefab = data.IsRanged ? data.MuzzleFlashPrefab : data.MuzzleFlashPrefab; // Uprav dle potřeby (Swing vs Muzzle)
-        
+
         if (data.IsRanged)
         {
             _currentSpawnPoint = weaponInstance.transform.Find("FirePoint");
@@ -29,10 +33,21 @@ public class WeaponVisualsController : MonoBehaviour
             _currentSpawnPoint = weaponInstance.transform.Find("SwingPoint");
             if (_currentSpawnPoint == null) _currentSpawnPoint = weaponInstance.transform;
         }
+
+        // POKUD JE TO LASER: Instanciujeme ho HNED, ale skryjeme ho.
+        if (_isLaserWeapon && _currentVfxPrefab != null)
+        {
+            GameObject go = Instantiate(_currentVfxPrefab);
+            // Laser musí být v Rootu scény (ne child), aby se nedeformoval rotací rodiče, 
+            // protože LineRenderer používá World Space.
+            _activeLaserInstance = go.GetComponent<LaserBeamVFX>();
+            _activeLaserInstance.StopBeam();
+        }
     }
 
     public void OnAttackVisual(float cooldown)
     {
+        if (_isLaserWeapon) return;
         if (_currentVfxPrefab == null || _currentSpawnPoint == null) return;
 
         // 3. Pokus najít volný efekt v poolu
@@ -82,5 +97,31 @@ public class WeaponVisualsController : MonoBehaviour
         }
 
         return pooled;
+    }
+
+    public void UpdateLaserVisual(bool isFiring, Vector3 targetPoint)
+    {
+        if (!_isLaserWeapon)
+        {
+            // Pokud se toto vypisuje, nemáš zaškrtnuté "Is Continuous" ve WeaponData!
+            Debug.LogWarning("Není označeno jako LaserWeapon!"); 
+            return;
+        }
+
+        if (_activeLaserInstance == null)
+        {
+            // Pokud se toto vypisuje, prefab nemá skript LaserBeamVFX nebo se nenaspawnoval.
+            Debug.LogError("Chybí instance laseru! Zkontroluj MuzzleFlashPrefab.");
+            return;
+        }
+        if (isFiring)
+        {
+            // Aktualizujeme pozici laseru (Start = hlaveň, Konec = vypočítaný bod)
+            _activeLaserInstance.UpdateBeam(_currentSpawnPoint.position, targetPoint);
+        }
+        else
+        {
+            _activeLaserInstance.StopBeam();
+        }
     }
 }

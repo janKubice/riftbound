@@ -360,7 +360,20 @@ public class PlayerController : NetworkBehaviour
             // ŘEŠENÍ: Prostě zavoláme metodu ve WeaponManageru a ten si cooldown pohlídá.
             if (_weaponManager != null)
             {
+                if (_weaponManager.CurrentWeaponData != null && _weaponManager.CurrentWeaponData.IsContinuous)
+                {
+                    _weaponManager.SetContinuousFireState(true);
+                }
+
                 _weaponManager.TryAttackLocalLoop();
+            }
+        }
+        else
+        {
+            // Pokud tlačítko nedržím, vypneme laser
+            if (_weaponManager.CurrentWeaponData != null && _weaponManager.CurrentWeaponData.IsContinuous)
+            {
+                _weaponManager.SetContinuousFireState(false);
             }
         }
 

@@ -113,17 +113,24 @@ public class LobbyRoomManager : NetworkBehaviour
         }
     }
 
-    [ServerRpc(RequireOwnership = false)]
+    [ServerRpc(RequireOwnership = false)] // Důležité: false, aby to mohl zavolat klient
     public void ToggleReadyServerRpc(ServerRpcParams rpcParams = default)
     {
         ulong senderId = rpcParams.Receive.SenderClientId;
-        int index = FindPlayerIndex(senderId);
 
-        if (index != -1)
+        // Najít hráče v seznamu a změnit mu stav
+        for (int i = 0; i < LobbyPlayers.Count; i++)
         {
-            LobbyPlayerData data = LobbyPlayers[index];
-            data.IsReady = !data.IsReady;
-            LobbyPlayers[index] = data;
+            if (LobbyPlayers[i].ClientId == senderId)
+            {
+                // Structy jsou hodnotové typy, musíme je zkopírovat, upravit a vrátit
+                LobbyPlayerData data = LobbyPlayers[i];
+                data.IsReady = !data.IsReady;
+                LobbyPlayers[i] = data; // Tímto se vyvolá OnListChanged
+
+                Debug.Log($"Player {senderId} ready state toggled to: {data.IsReady}");
+                return;
+            }
         }
     }
 

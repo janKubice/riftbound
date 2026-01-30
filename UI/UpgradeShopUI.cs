@@ -17,9 +17,8 @@ public class UpgradeShopUI : MonoBehaviour
 
     // Reference na komponenty hráče
     private PlayerController _localPlayerController;
-    private PlayerVFX _localPlayerVFX; // <--- PŘIDÁNO PRO EFEKT
-    private Animator _localAnimator;   // <--- PŘIDÁNO PRO ZASTAVENÍ ANIMACÍ
-
+    private PlayerVFX _localPlayerVFX;
+    private Animator _localAnimator;
     private bool _isOpen = false;
 
     private void Start()

@@ -22,7 +22,8 @@ public class WeaponManager : NetworkBehaviour
 
     // Aktuálně vybavený objekt
     private GameObject _currentWeaponInstance;
-    private WeaponStats _currentRuntimeStats;
+    [SerializeField] private WeaponStats _currentRuntimeStats;
+    public WeaponStats CurrentRuntimeStats => _currentRuntimeStats;
     private WeaponData _currentWeaponData; // Aktuální data (včetně logiky útoku)
     public WeaponData CurrentWeaponData => _currentWeaponData;
     private AnimatorOverrideController _animOverrideController;
@@ -32,10 +33,11 @@ public class WeaponManager : NetworkBehaviour
     // Síťová proměnná, která říká, jaký prefab zbraně se má zobrazit (index do seznamu _weaponPrefabs)
     // -1 znamená beze zbraně (unarmed)
     public NetworkVariable<int> _currentWeaponIndex = new NetworkVariable<int>(-1, NetworkVariableReadPermission.Everyone, NetworkVariableWritePermission.Server);
+    private NetworkVariable<bool> _isContinuousFiring = new NetworkVariable<bool>(false, NetworkVariableReadPermission.Everyone, NetworkVariableWritePermission.Server);
     private float _lastAttackTime = -999f;
 
     [SerializeField] private WeaponVisualsController _visuals;
-
+    private PlayerAiming _aiming;
 
     public override void OnNetworkSpawn()
     {
@@ -57,8 +59,9 @@ public class WeaponManager : NetworkBehaviour
         if (IsServer)
         {
             // Pokud začínáme bez zbraně
-            _currentWeaponIndex.Value = -1; 
+            _currentWeaponIndex.Value = -1;
         }
+        _aiming = GetComponent<PlayerAiming>();
 
     }
 
@@ -93,6 +96,28 @@ public class WeaponManager : NetworkBehaviour
             {
                 // Pošleme serveru žádost o zahození
                 DropWeaponServerRpc();
+            }
+        }
+    }
+
+    private void LateUpdate()
+    {
+        // 1. Ověříme, že držíme kontinuální zbraň (Laser)
+        if (_currentWeaponData != null && _currentWeaponData.IsContinuous)
+        {
+            // 2. Ověříme síťovou proměnnou (zda se střílí)
+            if (_isContinuousFiring.Value)
+            {
+                // 3. Vypočítáme, kam laser dopadá
+                Vector3 endPos = CalculateLaserEndPoint();
+
+                // 4. Řekneme vizuálu, ať se tam vykreslí
+                _visuals.UpdateLaserVisual(true, endPos);
+            }
+            else
+            {
+                // Pokud se nestřílí, laser vypneme
+                _visuals.UpdateLaserVisual(false, Vector3.zero);
             }
         }
     }
@@ -184,14 +209,18 @@ public class WeaponManager : NetworkBehaviour
     }
 
     [ServerRpc]
-    // Voláno, když hráč zmáčkne tlačítko (z PlayerController)
     public void RequestAttackServerRpc()
     {
-        Debug.Log("[WeaponManager] pokus o útok.");
         if (_currentWeaponData != null && _currentWeaponData.AttackLogic != null)
         {
-            // NOVÉ: Předáváme _currentRuntimeStats místo fixních hodnot
-            _currentWeaponData.AttackLogic.ExecuteAttack(NetworkObject, this, GetFirePoint(), _currentRuntimeStats);
+            // 1. Vytvoříme dočasnou kopii statistik pro tento výstřel
+            WeaponStats attackStats = _currentRuntimeStats;
+
+            // 2. Naplníme ji kombinovanými efekty (Zbraň + Global)
+            attackStats.OnHitEffects = GetCombinedEffects();
+
+            // 3. Předáme Logic
+            _currentWeaponData.AttackLogic.ExecuteAttack(NetworkObject, this, GetFirePoint(), attackStats);
         }
     }
 
@@ -234,7 +263,7 @@ public class WeaponManager : NetworkBehaviour
         }
 
         Collider[] enviroHits = Physics.OverlapSphere(position, 2.0f); // Radius 2 metry
-        
+
         foreach (var hit in enviroHits)
         {
             // Hledáme náš nový skript na stromech
@@ -405,5 +434,222 @@ public class WeaponManager : NetworkBehaviour
         }
 
         return holder.Data;
+    }
+
+    public void SetContinuousFireState(bool isFiring)
+    {
+        if (!IsOwner) return;
+        // Pošleme požadavek na server jen pokud se stav změnil
+        if (_isContinuousFiring.Value != isFiring)
+        {
+            SetContinuousFireServerRpc(isFiring);
+        }
+    }
+
+    [ServerRpc]
+    public void SpawnLaserServerRpc(Vector3 startPoint, Vector3 endPoint)
+    {
+        // Server to rozešle všem klientům
+        SpawnLaserClientRpc(startPoint, endPoint);
+    }
+
+    [ClientRpc]
+    private void SpawnLaserClientRpc(Vector3 startPoint, Vector3 endPoint)
+    {
+        // 1. Získáme prefab pro vizuál (použijeme MuzzleFlashPrefab z WeaponData jako "Laser Prefab")
+        if (_currentWeaponData != null && _currentWeaponData.MuzzleFlashPrefab != null)
+        {
+            // Instancujeme vizuál laseru
+            GameObject laserInstance = Instantiate(_currentWeaponData.MuzzleFlashPrefab, Vector3.zero, Quaternion.identity);
+
+            // 2. Nastavíme mu pozice
+            if (laserInstance.TryGetComponent(out LaserBeamVFX laserScript))
+            {
+                laserScript.UpdateBeam(startPoint, endPoint);
+            }
+            else
+            {
+                // Fallback pro TrailRenderer (pokud trváš na Trailu, jen ho přesuneme a natáhneme)
+                LineRenderer lr = laserInstance.GetComponent<LineRenderer>();
+                if (lr != null)
+                {
+                    lr.SetPosition(0, startPoint);
+                    lr.SetPosition(1, endPoint);
+                }
+            }
+        }
+    }
+
+    [ServerRpc]
+    private void SetContinuousFireServerRpc(bool isFiring)
+    {
+        _isContinuousFiring.Value = isFiring;
+    }
+
+    private Vector3 CalculateLaserEndPoint()
+    {
+        Transform startT = GetFirePoint();
+        if (startT == null) return transform.position;
+
+        Vector3 start = startT.position;
+        Vector3 dir = startT.forward;
+
+        // Zpřesnění směru podle kamery
+        if (_aiming != null)
+        {
+            Vector3 target = _aiming.CurrentAimPoint;
+            // Ošetření, aby dir nebyl zero vector
+            Vector3 targetDir = (target - start).normalized;
+            if (targetDir != Vector3.zero) dir = targetDir;
+        }
+
+        float range = _currentWeaponData.BaseStats.Range > 0 ? _currentWeaponData.BaseStats.Range : 50f;
+
+        // OPRAVA: Použijeme RaycastAll a vyfiltrujeme sebe
+        RaycastHit[] hits = Physics.RaycastAll(start, dir, range, ~0, QueryTriggerInteraction.Ignore);
+        System.Array.Sort(hits, (a, b) => a.distance.CompareTo(b.distance));
+
+        foreach (var hit in hits)
+        {
+            // Klíčová kontrola: Pokud je trefený objekt součástí mého hráče (stejný root), ignoruj ho
+            if (hit.transform.root == transform.root) continue;
+
+            return hit.point; // První cizí překážka
+        }
+
+        // Nic jsme netrefili -> laser do nekonečna
+        return start + (dir * range);
+    }
+
+    [ServerRpc]
+    public void SpawnChainLightningServerRpc(Vector3[] points)
+    {
+        SpawnChainLightningClientRpc(points);
+    }
+
+    [ClientRpc]
+    private void SpawnChainLightningClientRpc(Vector3[] points)
+    {
+        // Použijeme MuzzleFlashPrefab jako prefab blesku
+        if (_currentWeaponData != null && _currentWeaponData.MuzzleFlashPrefab != null)
+        {
+            GameObject lightningGO = Instantiate(_currentWeaponData.MuzzleFlashPrefab, Vector3.zero, Quaternion.identity);
+
+            if (lightningGO.TryGetComponent(out ChainLightningVFX vfx))
+            {
+                vfx.DrawChain(points);
+            }
+            else
+            {
+                // Fallback pro obyčejný LineRenderer
+                LineRenderer lr = lightningGO.GetComponent<LineRenderer>();
+                if (lr != null)
+                {
+                    lr.positionCount = points.Length;
+                    lr.SetPositions(points);
+                    Destroy(lightningGO, 0.2f);
+                }
+            }
+        }
+    }
+
+    /// <summary>
+    /// Spojí lokální efekty zbraně a globální efekty hráče do jednoho seznamu.
+    /// Volá se před každým útokem.
+    /// </summary>
+    public List<HitEffect> GetCombinedEffects()
+    {
+        List<HitEffect> combined = new List<HitEffect>();
+
+        // 1. Přidat efekty zbraně
+        if (_currentRuntimeStats.OnHitEffects != null)
+        {
+            combined.AddRange(_currentRuntimeStats.OnHitEffects);
+        }
+
+        // 2. Přidat globální efekty hráče
+        var globalFX = GetComponent<PlayerGlobalEffects>();
+        if (globalFX != null && globalFX.GlobalEffects != null)
+        {
+            combined.AddRange(globalFX.GlobalEffects);
+        }
+
+        return combined;
+    }
+
+    // --- RPC PRO OBCHOD (Server Authority) ---
+
+    [ServerRpc]
+    public void AddWeaponEffectServerRpc(int shopItemIndex, NetworkBehaviourReference shopRef)
+    {
+        // Získáme referenci na obchod, abychom vytáhli správný efekt
+        if (shopRef.TryGet(out ShopInteractable shop))
+        {
+            ShopItemData item = shop.GetItemByIndex(shopItemIndex);
+            if (item != null && !item.IsGlobalUpgrade)
+            {
+                if (_currentRuntimeStats.OnHitEffects == null)
+                    _currentRuntimeStats.OnHitEffects = new List<HitEffect>();
+
+                _currentRuntimeStats.OnHitEffects.Add(item.EffectPayload);
+                Debug.Log($"[WeaponManager] Efekt {item.ItemName} přidán na zbraň.");
+            }
+        }
+    }
+
+    [ServerRpc]
+    public void RemoveWeaponEffectServerRpc(int listIndex)
+    {
+        if (_currentRuntimeStats.OnHitEffects == null) return;
+        if (listIndex >= 0 && listIndex < _currentRuntimeStats.OnHitEffects.Count)
+        {
+            _currentRuntimeStats.OnHitEffects.RemoveAt(listIndex);
+        }
+    }
+
+    [ServerRpc]
+    public void SwapWeaponEffectsServerRpc(int indexA, int indexB)
+    {
+        if (_currentRuntimeStats.OnHitEffects == null) return;
+        int count = _currentRuntimeStats.OnHitEffects.Count;
+
+        if (indexA >= 0 && indexA < count && indexB >= 0 && indexB < count)
+        {
+            // Prohození
+            var temp = _currentRuntimeStats.OnHitEffects[indexA];
+            _currentRuntimeStats.OnHitEffects[indexA] = _currentRuntimeStats.OnHitEffects[indexB];
+            _currentRuntimeStats.OnHitEffects[indexB] = temp;
+        }
+    }
+
+    public void AddRuntimeEffect(HitEffect effect)
+    {
+        if (!IsServer) return;
+        if (_currentRuntimeStats.OnHitEffects == null) _currentRuntimeStats.OnHitEffects = new System.Collections.Generic.List<HitEffect>();
+
+        _currentRuntimeStats.OnHitEffects.Add(effect);
+    }
+
+    // Prohodit efekty (pouze Server)
+    public void SwapEffects(int indexA, int indexB)
+    {
+        if (!IsServer || _currentRuntimeStats.OnHitEffects == null) return;
+        var list = _currentRuntimeStats.OnHitEffects;
+        if (indexA >= 0 && indexA < list.Count && indexB >= 0 && indexB < list.Count)
+        {
+            var temp = list[indexA];
+            list[indexA] = list[indexB];
+            list[indexB] = temp;
+        }
+    }
+
+    // Odstranit efekt (pouze Server)
+    public void RemoveEffect(int index)
+    {
+        if (!IsServer || _currentRuntimeStats.OnHitEffects == null) return;
+        if (index >= 0 && index < _currentRuntimeStats.OnHitEffects.Count)
+        {
+            _currentRuntimeStats.OnHitEffects.RemoveAt(index);
+        }
     }
 }

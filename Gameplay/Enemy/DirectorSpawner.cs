@@ -2,6 +2,8 @@ using UnityEngine;
 using Unity.Netcode;
 using System.Collections.Generic;
 using System.Linq;
+using UnityEngine.UI;
+using TMPro;
 
 public class DirectorSpawner : NetworkBehaviour
 {
@@ -14,6 +16,9 @@ public class DirectorSpawner : NetworkBehaviour
     [SerializeField] private float _baseCreditsPerSecond = 1.0f;
     [SerializeField] private float _difficultyScaling = 0.1f;
     [SerializeField] private int _maxEnemiesAlive = 200;
+    [Header("Scaling Curve")]
+    [Tooltip("Jak agresivní je křivka obtížnosti. (1.1 = +10% každou minutu skládanně)")]
+    [SerializeField] private float _exponentialScalingFactor = 1.1f;
 
     [Header("Performance Limits")]
     [Tooltip("Maximální počet spawnu za jeden frame (brání zásekům).")]
@@ -30,11 +35,13 @@ public class DirectorSpawner : NetworkBehaviour
 
     // Runtime stav
     private float _accumulatedCredits = 0;
+    private float _totalCredits = 0;
     private float _gameTime = 0;
     private float _difficultyMultiplier = 1.0f;
     private bool _hasGameStarted = false;
     private float _lastPlayerCheckTime;
     private bool _arePlayersActive = false;
+    [SerializeField] private TextMeshProUGUI diffText;
 
     // Kolekce
     private HashSet<EnemySpawnPoint> _spawnPoints = new HashSet<EnemySpawnPoint>();
@@ -102,44 +109,70 @@ public class DirectorSpawner : NetworkBehaviour
         float dt = Time.deltaTime;
         _gameTime += dt;
 
-        // Vzorec: Obtížnost roste s časem
-        _difficultyMultiplier = 1.0f + (_gameTime * _difficultyScaling / 60f);
+        float minutes = _gameTime / 60f;
+
+        // Vzorec: (Faktor ^ Minuty)
+        // Příklad při faktoru 1.15:
+        // 0 min = 1.0x
+        // 5 min = 2.0x
+        // 10 min = 4.0x
+        // 20 min = 16.0x (Tady už to bude masakr)
+        _difficultyMultiplier = Mathf.Pow(_exponentialScalingFactor, minutes);
+
+        // Přísun kreditů se také násobí obtížností, aby Director stíhal spawnovat dražší potvory
+        float creditsIncome = _baseCreditsPerSecond * _difficultyMultiplier * dt;
+
+        // Volitelné: Vlny (Sine wave) - aby hra "dýchala" (chvíli klid, chvíli peklo)
+        float waveMultiplier = 1.0f + (Mathf.Sin(Time.time * 0.1f) * 0.5f); // Kolísá mezi 0.5x a 1.5x
 
         // Přísun kreditů
-        _accumulatedCredits += _baseCreditsPerSecond * _difficultyMultiplier * dt;
+        _accumulatedCredits += creditsIncome * waveMultiplier;
+        _totalCredits += creditsIncome * waveMultiplier;
 
         // 3. Spawnování (Rozložené v čase)
         ProcessSpawnQueue();
+
+        updateUI();
     }
 
     private void ProcessSpawnQueue()
     {
-        // Pokud máme dost nepřátel, šetříme kredity (nebo je můžeme zastropovat)
-        if (_enemiesAliveNetVar.Value >= _maxEnemiesAlive) return;
+        if (_enemiesAliveNetVar.Value >= _maxEnemiesAlive)
+        {
+            _accumulatedCredits = Mathf.Lerp(_accumulatedCredits, 0, Time.deltaTime * 0.3f);
+            return;
+        }
 
         int spawnsThisFrame = 0;
 
-        // "While" je zde bezpečné, protože je omezeno _maxSpawnsPerFrame (např. 2)
-        // Nikdy nezasekne hru na více než pár milisekund.
+        // Loop dokud máme kredity a nejsme na limitu
         while (_accumulatedCredits > 0 &&
                spawnsThisFrame < _maxSpawnsPerFrame &&
                _enemiesAliveNetVar.Value < _maxEnemiesAlive)
         {
-            // Zkusíme vybrat nepřítele, na kterého máme
+            // 1. Vybereme TYP nepřítele (Zombie, Střelec...)
             EnemyDefinition enemyToSpawn = PickAffordableEnemy(_accumulatedCredits);
-
-            // Pokud nemáme ani na nejlevnějšího, končíme pro tento frame a šetříme dál
-            if (enemyToSpawn == null) break;
+            if (enemyToSpawn == null) break; // Nemáme ani na základ, končíme frame
 
             EnemySpawnPoint sp = GetSmartSpawnPoint();
-            if (sp == null) break; // Není kde spawnovat
+            if (sp == null) break;
 
-            // Kalkulace Tieru
+            // 2. Vypočítáme TIER (Normal, Elite, Boss) podle nové logiky
             EnemyTier tier = CalculateTier(sp.ZoneDifficulty);
             float tierMult = GetTierMultiplier(tier);
             float finalCost = enemyToSpawn.Cost * tierMult;
 
-            // Double check ceny (kvůli tieru)
+            // --- POJISTKA PROTI ZASEKNUTÍ ---
+            // Pokud Director vylosoval Elite/Boss, ale nemá na něj kredity,
+            // donutíme ho spawnout Normal verzi, aby hra nestála.
+            if (_accumulatedCredits < finalCost && tier != EnemyTier.Normal)
+            {
+                tier = EnemyTier.Normal;
+                tierMult = 1.0f;
+                finalCost = enemyToSpawn.Cost;
+            }
+
+            // 3. Finální spawn, pokud máme alespoň na Normal
             if (_accumulatedCredits >= finalCost)
             {
                 SpawnEnemy(enemyToSpawn, tier, sp);
@@ -148,8 +181,7 @@ public class DirectorSpawner : NetworkBehaviour
             }
             else
             {
-                // Máme na základní verzi, ale ne na Elite verzi. 
-                // Buď přeskočíme, nebo spawneme Normal verzi. Zde počkáme na víc kreditů.
+                // Nemáme ani na Normal verzi -> musíme šetřit.
                 break;
             }
         }
@@ -211,21 +243,64 @@ public class DirectorSpawner : NetworkBehaviour
         {
             if (!netObj.IsSpawned) netObj.Spawn(true);
 
-            // Inicializace AI
             if (netObj.TryGetComponent(out EnemyBaseAI ai))
             {
-                float tierMulti = GetTierMultiplier(tier);
-                // Vzorec pro staty
-                float totalStatMultiplier = tierMulti * _difficultyMultiplier;
+                // --- 1. Multipliers ---
+                float tierMulti = GetTierMultiplier(tier); // Např. 1.0, 1.5, 3.0
+                float timeMulti = _difficultyMultiplier;   // Globální čas
+                                                           // Zone: Odmocnina tlumí extrémní nárůst HP, ale stále ho zvedá
+                float zoneMulti = Mathf.Sqrt(sp.ZoneDifficulty);
 
-                int hp = Mathf.RoundToInt(def.BaseHealth * totalStatMultiplier);
-                int dmg = Mathf.RoundToInt(def.BaseDamage * totalStatMultiplier);
+                // Kombinovaný multiplikátor pro "Toughness" (HP/DMG)
+                float powerFactor = tierMulti * timeMulti * zoneMulti;
 
-                // Speed škálujeme méně agresivně
-                float speed = def.BaseSpeed * (1 + (tierMulti * 0.1f)) * (1 + (_gameTime * 0.001f)); // Velmi pomalý nárůst rychlosti časem
-                float scale = 1.0f + (tierMulti * 0.15f);
+                // --- 2. Stat Calculations ---
+                int hp = Mathf.RoundToInt(def.BaseHealth * powerFactor);
+                int dmg = Mathf.RoundToInt(def.BaseDamage * powerFactor);
 
-                ai.InitializeEnemy(tier, hp, dmg, speed, scale, tier, pos);
+                // XP musí škálovat s obtížností, jinak se hráči nevyplatí bojovat v těžkých zónách
+                int xp = Mathf.CeilToInt(def.BaseXPDrop * (powerFactor * 0.8f));
+
+                // Rychlost: Opatrně, příliš rychlí nepřátelé rozbíjí gameplay loop (kiting)
+                float speed = def.BaseSpeed * (1 + (timeMulti * 0.03f) + (tierMulti * 0.05f));
+
+                // Attack Rate: Elites útočí trochu rychleji (max +50%)
+                float atkRate = def.BaseAttackRate * (1 + Mathf.Clamp((tierMulti - 1) * 0.2f, 0, 0.5f));
+
+                // Knockback Resistance: Silnější nepřátelé se hůře odhazují
+                // Vzorec zajistí, že se blíží k 1, ale nikdy ji nepřekročí
+                float kbRes = def.BaseKnockbackResistance + (1 - def.BaseKnockbackResistance) * (1 - (1 / tierMulti));
+
+                // --- 3. Advanced Scale Logic ---
+                // Základní velikost
+                float baseScale = 1.0f;
+
+                // Zvětšení podle Tieru (Elite je větší)
+                float tierBonus = (tierMulti - 1.0f) * 0.2f;
+
+                // Zvětšení podle Zóny (Vizuální indikace, že nepřátelé v této zóně jsou "drsnější")
+                // Dělíme větším číslem, aby vliv zóny nebyl tak drastický jako Tier
+                float zoneBonus = (sp.ZoneDifficulty - 1) * 0.05f;
+
+                // Random Jitter: +/- 10% velikosti pro organický vzhled hordy
+                float randomJitter = Random.Range(-0.1f, 0.1f);
+
+                // Výsledná velikost (Clampujeme, aby nebyli menší než 0.8 a větší než např. 3.0)
+                float finalScale = Mathf.Clamp(baseScale + tierBonus + zoneBonus + randomJitter, 0.8f, 3.0f);
+
+                // --- 4. Initialize ---
+                // Zde předáváme nové parametry do AI (ujistěte se, že InitializeEnemy je upravena)
+                ai.InitializeEnemy(
+                    tier,
+                    hp,
+                    dmg,
+                    speed,
+                    finalScale,
+                    atkRate,
+                    kbRes,
+                    xp,
+                    pos
+                );
             }
 
             _enemiesAliveNetVar.Value++;
@@ -293,13 +368,25 @@ public class DirectorSpawner : NetworkBehaviour
 
     private EnemyTier CalculateTier(float zoneDifficulty)
     {
-        float roll = Random.value;
-        // Příklad: zoneDiff 1.0 = normal, zoneDiff 2.0 = double chance
-        if (roll < _championChance * zoneDifficulty) return EnemyTier.Boss;
-        if (roll < _eliteChance * zoneDifficulty) return EnemyTier.Elite;
+        float roll = Random.value; // 0.0 až 1.0
+
+        // --- NOVÁ MATEMATIKA PRO ZÓNY 5-80 ---
+        // Místo násobení použijeme přičítání s normalizací.
+        // Předpokládáme, že ZoneDifficulty 100 je "konec hry".
+
+        // Base šance (z Inspectoru) + bonus za obtížnost zóny
+        // Příklad: Zóna 80 přidá (80 * 0.005) = +0.4 (40%) k šanci.
+        float zoneFactor = zoneDifficulty * 0.005f;
+
+        float finalEliteChance = Mathf.Clamp(_eliteChance + zoneFactor, 0f, 0.6f); // Max 60% Elite
+        float finalChampionChance = Mathf.Clamp(_championChance + (zoneFactor * 0.2f), 0f, 0.15f); // Max 15% Boss
+
+        // Vyhodnocení (od nejvzácnějšího)
+        if (roll < finalChampionChance) return EnemyTier.Boss;
+        if (roll < finalChampionChance + finalEliteChance) return EnemyTier.Elite;
+
         return EnemyTier.Normal;
     }
-
     private float GetTierMultiplier(EnemyTier tier)
     {
         switch (tier)
@@ -309,6 +396,11 @@ public class DirectorSpawner : NetworkBehaviour
             case EnemyTier.Boss: return 25.0f;
             default: return 1.0f;
         }
+    }
+
+    private void updateUI()
+    {
+        diffText.text = "Difficulty: " + _totalCredits.ToString();
     }
 
     private void OnGUI()

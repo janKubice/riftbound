@@ -1,3 +1,4 @@
+using System.Collections.Generic;
 using UnityEngine;
 
 [System.Serializable]
@@ -27,4 +28,10 @@ public struct WeaponStats
     [Header("Elemental")]
     public DamageType DamageType;
     public StatusEffectData Effect; // Hlavní efekt zbraně
+
+    [Header("Resource Costs")]
+    public float ManaCost;
+
+    [Header("OnHits")]
+    public List<HitEffect> OnHitEffects;
 }

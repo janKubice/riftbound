@@ -27,4 +27,7 @@ public class WeaponData : ScriptableObject
     [Header("Settings")]
     public bool IsRanged = false;
     public bool IsTwoHanded = false;
+
+    [Tooltip("Pokud je true, WeaponManager bude řešit vizuál jako kontinuální paprsek.")]
+    public bool IsContinuous = false;
 }
