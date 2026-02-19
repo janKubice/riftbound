@@ -1,9 +1,10 @@
 using UnityEngine;
-using UnityEngine.Rendering; // Potřeba pro AmbientMode
 
 [ExecuteAlways]
 public class DayNightCycle : MonoBehaviour
 {
+    public static DayNightCycle Instance { get; private set; }
+
     [Header("Čas")]
     [Range(0, 24)] public float TimeOfDay = 12.0f;
     public float DayDurationInSeconds = 120.0f;
@@ -19,70 +20,89 @@ public class DayNightCycle : MonoBehaviour
     public Gradient FogColor;
 
     [Header("Nebeská Tělesa")]
-    public Gradient SunColor; 
+    public Gradient SunColor;
     public Gradient MoonColor;
-    
+
     [Header("Osvětlení Scény")]
-    public Gradient AmbientColor; // Nový gradient pro stíny
-    public AnimationCurve LightIntensity; 
+    public Gradient AmbientColor;
+    public AnimationCurve LightIntensity;
     public AnimationCurve StarVisibility;
+
+    public Color CurrentFogColor { get; private set; }
+    public Color CurrentAmbientColor { get; private set; }
+
+    // --- OPTIMALIZACE: Cachované ID shader properties ---
+    private static readonly int _TopColorID = Shader.PropertyToID("_TopColor");
+    private static readonly int _HorizonColorID = Shader.PropertyToID("_HorizonColor");
+    private static readonly int _BottomColorID = Shader.PropertyToID("_BottomColor");
+    private static readonly int _SunColorID = Shader.PropertyToID("_SunColor");
+    private static readonly int _MoonColorID = Shader.PropertyToID("_MoonColor");
+    private static readonly int _StarIntensityID = Shader.PropertyToID("_StarIntensity");
+    private static readonly int _SunDirectionID = Shader.PropertyToID("_SunDirection");
+
+    private void Awake()
+    {
+        if (Application.isPlaying) Instance = this;
+    }
 
     private void Start()
     {
-        // 1. Důležité: Přepneme Unity z "Skybox Lighting" na "Color Lighting"
-        // Abychom nad tím měli 100% kontrolu skriptem
-        RenderSettings.ambientMode = AmbientMode.Flat;
+        RenderSettings.ambientMode = UnityEngine.Rendering.AmbientMode.Flat;
     }
 
     private void Update()
     {
-        if (_skyboxMaterial == null) 
+        // Validace materiálu (editor safe)
+        if (_skyboxMaterial == null)
         {
             _skyboxMaterial = RenderSettings.skybox;
             if (_skyboxMaterial == null) return;
         }
-        if (_directionalLight == null) return;
 
+        // Posun času
         if (Application.isPlaying)
         {
             TimeOfDay += (Time.deltaTime / DayDurationInSeconds) * 24.0f;
-            if (TimeOfDay >= 24.0f) TimeOfDay = 0.0f;
+            if (TimeOfDay >= 24.0f) TimeOfDay %= 24.0f;
         }
 
-        UpdateVisuals();
+        UpdateCalculations();
     }
 
-    private void UpdateVisuals()
+    private void UpdateCalculations()
     {
         float timePercent = TimeOfDay / 24.0f;
 
-        // Rotace Slunce
+        // 1. Rotace Slunce
+        // -90 je východ, 90 západ (přibližně), 270 půlnoc
         float sunAngle = (timePercent * 360.0f) - 90.0f; 
-        _directionalLight.transform.localRotation = Quaternion.Euler(sunAngle, 170.0f, 0);
 
-        // Barvy Oblohy
-        _skyboxMaterial.SetColor("_TopColor", TopColor.Evaluate(timePercent));
-        _skyboxMaterial.SetColor("_HorizonColor", HorizonColor.Evaluate(timePercent));
-        _skyboxMaterial.SetColor("_BottomColor", BottomColor.Evaluate(timePercent));
-        _skyboxMaterial.SetColor("_SunColor", SunColor.Evaluate(timePercent));
-        _skyboxMaterial.SetColor("_MoonColor", MoonColor.Evaluate(timePercent));
+        if (_directionalLight != null)
+        {
+            _directionalLight.transform.localRotation = Quaternion.Euler(sunAngle, 170.0f, 0);
+            _directionalLight.intensity = LightIntensity.Evaluate(timePercent);
 
-        // Mlha
-        RenderSettings.fogColor = FogColor.Evaluate(timePercent);
-        
-        // Hvězdy
-        _skyboxMaterial.SetFloat("_StarIntensity", StarVisibility.Evaluate(timePercent));
+            // Nastavení globálního vektoru pro shader
+            // Důležité: Vector musí mířit KE slunci (proto -forward)
+            Shader.SetGlobalVector(_SunDirectionID, -_directionalLight.transform.forward);
+        }
 
-        // Intenzita slunce/měsíce
-        _directionalLight.intensity = LightIntensity.Evaluate(timePercent);
+        // 2. Barvy Skyboxu (použití ID místo stringů)
+        _skyboxMaterial.SetColor(_TopColorID, TopColor.Evaluate(timePercent));
+        _skyboxMaterial.SetColor(_HorizonColorID, HorizonColor.Evaluate(timePercent));
+        _skyboxMaterial.SetColor(_BottomColorID, BottomColor.Evaluate(timePercent));
+        _skyboxMaterial.SetColor(_SunColorID, SunColor.Evaluate(timePercent));
+        _skyboxMaterial.SetColor(_MoonColorID, MoonColor.Evaluate(timePercent));
+        _skyboxMaterial.SetFloat(_StarIntensityID, StarVisibility.Evaluate(timePercent));
 
-        // --- NOVÉ: AMBIENT LIGHT (TMA) ---
-        // Toto barví všechno, co je ve stínu.
-        RenderSettings.ambientLight = AmbientColor.Evaluate(timePercent);
-        
-        Shader.SetGlobalVector("_SunDirection", -_directionalLight.transform.forward);
+        // 3. Okolní prostředí
+        CurrentFogColor = FogColor.Evaluate(timePercent);
+        CurrentAmbientColor = AmbientColor.Evaluate(timePercent);
+
+        RenderSettings.fogColor = CurrentFogColor;
+        RenderSettings.ambientLight = CurrentAmbientColor;
     }
-    
+
     public string GetFormattedTime()
     {
         int hours = Mathf.FloorToInt(TimeOfDay);

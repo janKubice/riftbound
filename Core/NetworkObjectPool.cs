@@ -54,8 +54,8 @@ public class NetworkObjectPool : NetworkBehaviour
         {
             var go = Instantiate(prefab);
             var no = go.GetComponent<NetworkObject>();
-            go.SetActive(false);
             _pooledObjects[prefab].Enqueue(no);
+            go.SetActive(false);
         }
 
         // Řekneme Netcode, ať pro tento prefab používá náš pool

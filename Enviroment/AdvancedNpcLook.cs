@@ -3,92 +3,123 @@ using UnityEngine;
 public class AdvancedNpcLook : MonoBehaviour
 {
     [Header("Bones")]
-    [Tooltip("Transform hlavy nebo krku.")]
     [SerializeField] private Transform _headBone;
     
     [Header("Settings")]
     [SerializeField] private float _lookRadius = 8f;
     [SerializeField] private float _headTurnSpeed = 5f;
     [SerializeField] private float _bodyTurnSpeed = 2f;
+    [SerializeField] private Vector3 _lookOffset = new Vector3(0, 1.6f, 0); 
     
-    [Tooltip("Maximální úhel hlavy. Pokud je cíl dál, začne se točit tělo.")]
-    [SerializeField] private float _maxHeadAngle = 70f;
+    [Header("Angles & Hysteresis")]
+    [Tooltip("Kdy se tělo ZAČNE otáčet (např. 70 stupňů).")]
+    [SerializeField] private float _startBodyTurnAngle = 70f;
+    [Tooltip("Kdy se tělo PŘESTANE otáčet (např. 40 stupňů). Musí být menší než Start.")]
+    [SerializeField] private float _stopBodyTurnAngle = 40f;
+
+    [Header("Optimization")]
+    [SerializeField] private float _searchInterval = 0.5f;
+    [SerializeField] private LayerMask _targetLayer; 
 
     private Transform _target;
     private Quaternion _initialHeadRotation;
+    
+    private float _nextSearchTime;
+    private readonly Collider[] _hitBuffer = new Collider[20]; 
+    
+    // Stavová proměnná pro Hysterezi
+    private bool _isTurningBody = false;
 
     private void Start()
     {
         if (_headBone) _initialHeadRotation = _headBone.localRotation;
+        _nextSearchTime = Time.time + Random.Range(0f, _searchInterval);
     }
 
-    private void Update()
+    private void LateUpdate()
     {
-        // 1. Najít cíl (optimalizace: nehledat každý frame, ale pro jednoduchost zde OK)
-        FindClosestPlayer();
+        if (Time.time >= _nextSearchTime)
+        {
+            FindClosestPlayer();
+            _nextSearchTime = Time.time + _searchInterval;
+        }
 
         if (_target != null)
         {
-            Vector3 directionToTarget = _target.position - transform.position;
-            directionToTarget.y = 0; // Ignorujeme výšku pro rotaci těla
+            Vector3 targetLookPosition = _target.position + _lookOffset;
+            Vector3 dirToTarget = targetLookPosition - transform.position;
             
-            // --- Logika Těla ---
-            // Změříme úhel mezi "kam koukám tělem" a "kde je cíl"
-            float angleBody = Vector3.Angle(transform.forward, directionToTarget);
+            // --- 1. Stabilnější výpočet pro tělo (pouze Y osa) ---
+            Vector3 flatDir = Vector3.ProjectOnPlane(dirToTarget, Vector3.up);
 
-            // Pokud je úhel velký, otáčíme celým tělem
-            if (angleBody > _maxHeadAngle)
+            if (flatDir != Vector3.zero)
             {
-                Quaternion targetBodyRot = Quaternion.LookRotation(directionToTarget);
-                transform.rotation = Quaternion.Slerp(transform.rotation, targetBodyRot, Time.deltaTime * _bodyTurnSpeed);
+                float angleBody = Vector3.Angle(transform.forward, flatDir);
+
+                // --- HYSTEREZE (Řešení kmitání) ---
+                if (_isTurningBody)
+                {
+                    // Pokud už se točíme, zastavíme až když jsme dostatečně srovnaní (např. pod 40 stupňů)
+                    if (angleBody < _stopBodyTurnAngle) _isTurningBody = false;
+                }
+                else
+                {
+                    // Pokud stojíme, začneme se točit až při velkém úhlu (např. nad 70 stupňů)
+                    if (angleBody > _startBodyTurnAngle) _isTurningBody = true;
+                }
+
+                if (_isTurningBody)
+                {
+                    Quaternion targetBodyRot = Quaternion.LookRotation(flatDir);
+                    transform.rotation = Quaternion.Slerp(transform.rotation, targetBodyRot, Time.deltaTime * _bodyTurnSpeed);
+                }
             }
 
-            // --- Logika Hlavy ---
+            // --- 2. Vylepšená logika hlavy (Up Vector) ---
             if (_headBone != null)
             {
-                // Vypočítáme směr přímo na hlavu cíle (včetně výšky)
-                Vector3 headDir = _target.position - _headBone.position;
-                Quaternion lookRot = Quaternion.LookRotation(headDir);
-                
-                // Převedeme do lokálního prostoru rodiče hlavy, abychom mohli limitovat úhly
-                // (Tohle je zjednodušená verze, která funguje pro většinu humanoidů)
-                _headBone.rotation = Quaternion.Slerp(_headBone.rotation, lookRot, Time.deltaTime * _headTurnSpeed);
-                
-                // Clampování (pokud chceme být extra precizní, ale logika těla výše to řeší přirozeněji)
+                Vector3 headDir = targetLookPosition - _headBone.position;
+                if (headDir != Vector3.zero)
+                {
+                    // DŮLEŽITÉ: Jako druhý parametr dáváme transform.up.
+                    // To zajistí, že hlava respektuje náklon těla a "nekroutí" se divně.
+                    Quaternion lookRot = Quaternion.LookRotation(headDir, transform.up);
+                    _headBone.rotation = Quaternion.Slerp(_headBone.rotation, lookRot, Time.deltaTime * _headTurnSpeed);
+                }
             }
         }
         else
         {
-            // Reset hlavy, když nikdo není nablízku
             if (_headBone)
             {
                 _headBone.localRotation = Quaternion.Slerp(_headBone.localRotation, _initialHeadRotation, Time.deltaTime * _headTurnSpeed);
             }
+            // Když nemáme cíl, resetujeme stav otáčení těla
+            _isTurningBody = false;
         }
     }
 
     private void FindClosestPlayer()
     {
-        // Rychlá detekce bez alokace paměti (pomocí Physics.OverlapSphereNonAlloc by to bylo lepší, ale toto stačí)
-        Collider[] hits = Physics.OverlapSphere(transform.position, _lookRadius, LayerMask.GetMask("Player", "Default")); // Nastav LayerMask dle potřeby
+        int hitCount = Physics.OverlapSphereNonAlloc(transform.position, _lookRadius, _hitBuffer, _targetLayer);
         
         float closestDist = float.MaxValue;
-        _target = null;
+        Transform bestTarget = null;
 
-        foreach (var hit in hits)
+        for (int i = 0; i < hitCount; i++)
         {
-            if (hit.CompareTag("Player"))
+            Collider hit = _hitBuffer[i];
+            if (hit.CompareTag("Player") && hit.transform != transform)
             {
                 float d = Vector3.Distance(transform.position, hit.transform.position);
                 if (d < closestDist)
                 {
                     closestDist = d;
-                    _target = hit.transform;
-                    // Zkusíme najít "Head" bone hráče pro lepší oční kontakt, jinak bereme pivot
-                    Transform head = hit.transform.Find("Armature/Hips/Spine/Head"); // Příklad cesty
-                    if (head) _target = head;
+                    bestTarget = hit.transform;
                 }
             }
         }
+        
+        _target = bestTarget;
     }
 }

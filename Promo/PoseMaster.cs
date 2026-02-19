@@ -4,29 +4,42 @@ using UnityEngine;
 public class PoseMaster : MonoBehaviour
 {
     public Animator animator;
-    public string stateName = "Attack_Overhead"; // MUSÍ se shodovat s názvem v Animator okně (ne název souboru!)
-    [Range(0f, 1f)] public float playbackTime = 0.5f; // 0% až 100%
+    public string stateName = "Attack_Overhead";
+    [Range(0f, 1f)] public float playbackTime = 0.5f;
+    
+    // Přepínač chování
+    public bool loop = false; 
 
-    // Použijeme LateUpdate, protože ten běží AŽ PO interním update Animátoru.
-    // Tím přepíšeme cokoliv, co se Animátor snažil udělat (reset do stání).
     void LateUpdate()
     {
         if (animator == null) return;
 
-        // 1. Zastavíme interní hodiny animátoru
-        animator.speed = 0f;
-
-        // 2. Natvrdo vnutíme stav a čas
-        if (Application.isPlaying)
+        if (loop)
         {
-            // Ve hře musíme volat Play, aby přeskočil přechody (Transitions)
-            animator.Play(stateName, 0, playbackTime);
+            // REŽIM SMYČKY
+            animator.speed = 1f;
+
+            // V Editor Mode (ne Play Mode) se animátor sám neaktualizuje, musíme ho posunout manuálně
+            if (!Application.isPlaying)
+            {
+                animator.Update(Time.deltaTime);
+            }
+            // V Play Mode (Ingame) se o to Unity postará samo, když je speed > 0
         }
         else
         {
-            // V editoru používáme toto pro preview
-            animator.Play(stateName, 0, playbackTime);
-            animator.Update(0);
+            // REŽIM ZMRAZENÍ (Původní logika)
+            animator.speed = 0f;
+
+            if (Application.isPlaying)
+            {
+                animator.Play(stateName, 0, playbackTime);
+            }
+            else
+            {
+                animator.Play(stateName, 0, playbackTime);
+                animator.Update(0);
+            }
         }
     }
 }

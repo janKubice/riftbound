@@ -67,7 +67,7 @@ public class DialogueManager : MonoBehaviour
 
         // Zamkneme myš zpět (pokud nejsme v Shopu)
         // Pokud se přechází do Shopu, ShopManager si myš ohlídá sám.
-        if (ShopManager.Instance == null || !ShopManager.Instance.IsShopOpen)
+        if (ShopManager.Instance == null || !ShopManager.Instance.IsShopOpen())
         {
             Cursor.lockState = CursorLockMode.Locked;
             Cursor.visible = false;

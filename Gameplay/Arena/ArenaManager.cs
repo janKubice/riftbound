@@ -216,14 +216,22 @@ public class ArenaManager : NetworkBehaviour
 
         if (SteamStatsManager.Instance != null)
         {
-            SteamStatsManager.Instance.AddPvpMatch();
-
-            // 2. Pokud jsem já vítěz, započítám výhru
-            if (NetworkManager.Singleton.LocalClientId == winnerClientId)
+            if (SteamStatsManager.Instance != null)
             {
-                SteamStatsManager.Instance.AddPvpWin();
-                Debug.Log("[Client] Jsem vítěz! Zapisuji staty.");
+                // Připravíme parametry, aby se zpráva poslala JEN tomu, kdo útočil
+                ClientRpcParams clientParams = new ClientRpcParams
+                {
+                    Send = new ClientRpcSendParams
+                    {
+                        TargetClientIds = new ulong[] { winnerClientId }
+                    }
+                };
+
+                // Pošleme RPC konkrétnímu hráči: "Započítej si DMG"
+                SteamStatsManager.Instance.IncrementStatClientRpc("stat_matches_played", 1, clientParams);
             }
+
+
         }
     }
 

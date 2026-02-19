@@ -1,3 +1,4 @@
+using System.Collections.Generic;
 using UnityEngine;
 using UnityEngine.Rendering;
 
@@ -19,4 +20,11 @@ public class LocationProfile : ScriptableObject
     [Header("Particles (Juice)")]
     [Tooltip("Prefab s částicemi (např. poletující listí). Musí mít ParticleSystem.")]
     public GameObject AmbientParticlesPrefab;
+
+    [Header("Audio (Music Layer)")]
+    [Tooltip("Hudba hrající přes den (Ambient). Vybere se náhodně.")]
+    public List<AudioClip> DayTracks;
+    
+    [Tooltip("Hudba hrající v noci (Night Ambient). Vybere se náhodně.")]
+    public List<AudioClip> NightTracks;
 }

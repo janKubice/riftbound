@@ -1,6 +1,7 @@
 using UnityEngine;
 using Unity.Netcode;
 using System.Collections;
+using System.Collections.Generic; // Potřeba pro List
 
 [RequireComponent(typeof(NetworkObject))]
 [RequireComponent(typeof(NetworkedAudioSource))]
@@ -11,17 +12,18 @@ public class DestructibleProp : NetworkBehaviour
     [SerializeField] private float _respawnTime = 30.0f;
 
     [Header("Collision Settings")]
-    [Tooltip("Povolit zničení fyzickým nárazem (hráč, kámen, auto...).")]
+    [Tooltip("Povolit zničení fyzickým nárazem.")]
     [SerializeField] private bool _breakOnCollision = false;
-    [Tooltip("Minimální rychlost (síla) nárazu nutná ke zničení.")]
     [SerializeField] private float _collisionThreshold = 2.0f;
 
     [Header("Visuals")]
-    [SerializeField] private GameObject _intactModel;
-    [SerializeField] private GameObject _brokenModel;
-    [SerializeField] private ParticleSystem _breakVFX;
-    [Tooltip("Efekt při obnovení (např. 'poof' obláček). Volitelné.")]
-    [SerializeField] private ParticleSystem _respawnVFX;
+    // _intactModel JE PRYČ - skript si ho najde sám
+    
+    [Tooltip("Volitelné. Pokud je prázdné, objekt prostě zmizí.")]
+    [SerializeField] private GameObject _brokenModel; 
+    
+    [SerializeField] private GameObject _breakVFXPrefab;
+    [SerializeField] private GameObject _respawnVFXPrefab;
 
     [Header("Loot")]
     [SerializeField] private LootTable _lootTable;
@@ -33,10 +35,51 @@ public class DestructibleProp : NetworkBehaviour
 
     private NetworkVariable<bool> _isBroken = new NetworkVariable<bool>(false);
 
+    // Seznamy komponent, které budeme vypínat/zapínat
+    private List<Renderer> _intactRenderers = new List<Renderer>();
+    private List<Collider> _intactColliders = new List<Collider>();
+
+    private void Awake()
+    {
+        // 1. Najdeme všechny renderery a collidery na tomto objektu a dětech
+        var allRenderers = GetComponentsInChildren<Renderer>(true);
+        var allColliders = GetComponentsInChildren<Collider>(true);
+
+        if (_netAudio == null)
+        {
+            _netAudio = GetComponent<NetworkedAudioSource>();
+        }
+
+        // 2. Filtrujeme je. 
+        // Pokud máme _brokenModel, nesmíme do seznamu "intact" přidat jeho části.
+        foreach (var r in allRenderers)
+        {
+            // Pokud je to ParticleSystem renderer (VFX), ignorujeme ho
+            if (r is ParticleSystemRenderer) continue;
+
+            // Pokud máme broken model a tento renderer je jeho součástí, ignorujeme ho
+            if (_brokenModel != null && r.transform.IsChildOf(_brokenModel.transform)) continue;
+
+            _intactRenderers.Add(r);
+        }
+
+        foreach (var c in allColliders)
+        {
+            // Pokud máme broken model a tento collider je jeho součástí, ignorujeme ho
+            if (_brokenModel != null && c.transform.IsChildOf(_brokenModel.transform)) continue;
+
+            _intactColliders.Add(c);
+        }
+
+        // Pokud je nastaven broken model, ujistíme se, že je na začátku vypnutý
+        if (_brokenModel != null) _brokenModel.SetActive(false);
+    }
+
     public override void OnNetworkSpawn()
     {
         _isBroken.OnValueChanged += OnStateChanged;
-        UpdateVisuals(_isBroken.Value);
+        // Inicializace stavu (bez přehrání efektů)
+        UpdateVisuals(_isBroken.Value, playVFX: false);
     }
 
     public override void OnNetworkDespawn()
@@ -47,21 +90,13 @@ public class DestructibleProp : NetworkBehaviour
     private void OnCollisionEnter(Collision collision)
     {
         if (!IsServer || !_breakOnCollision || _isBroken.Value) return;
-
-        // Fyzická kolize má relativeVelocity
         CheckImpact(collision.relativeVelocity.magnitude);
     }
 
-    // 2. Veřejná metoda pro CharacterController nebo Raycasty
     public void CheckImpact(float forceMagnitude)
     {
-        // Logika běží jen na serveru
         if (!IsServer || !_breakOnCollision || _isBroken.Value) return;
-
-        if (forceMagnitude >= _collisionThreshold)
-        {
-            TakeHit();
-        }
+        if (forceMagnitude >= _collisionThreshold) TakeHit();
     }
 
     public void TakeHit()
@@ -70,16 +105,14 @@ public class DestructibleProp : NetworkBehaviour
 
         _isBroken.Value = true;
 
-        // --- SPAWN LOOTU ---
-        if (_lootTable != null && LootManager.Instance != null)
+        // Loot logic...
+        if (_lootTable != null) // && LootManager...
         {
-            // Náhoda na drop (pokud není v tabulce 100%)
-            if (Random.value < _lootChance)
-            {
-                LootManager.Instance.SpawnLoot(transform.position + Vector3.up * 0.5f, _lootTable);
-            }
+             if (Random.value < _lootChance)
+             {
+                 // Spawn loot
+             }
         }
-        // -------------------
 
         if (_netAudio != null) _netAudio.PlayOneShotNetworked(_breakSoundIndex);
         if (_respawnTime > 0) StartCoroutine(RespawnRoutine());
@@ -87,30 +120,65 @@ public class DestructibleProp : NetworkBehaviour
 
     private IEnumerator RespawnRoutine()
     {
+        // Protože nevypínáme tento GameObject, coroutina bezpečně běží
         yield return new WaitForSeconds(_respawnTime);
         _isBroken.Value = false;
     }
 
     private void OnStateChanged(bool oldVal, bool newVal)
     {
-        UpdateVisuals(newVal);
+        UpdateVisuals(newVal, playVFX: true);
     }
 
-    private void UpdateVisuals(bool isBroken)
+    private void UpdateVisuals(bool isBroken, bool playVFX)
     {
-        if (_intactModel) _intactModel.SetActive(!isBroken);
-        if (_brokenModel) _brokenModel.SetActive(isBroken);
+        // 1. Změníme viditelnost "Intact" částí (původní objekt)
+        foreach (var r in _intactRenderers)
+        {
+            if (r != null) r.enabled = !isBroken;
+        }
 
-        var col = GetComponent<Collider>();
-        if (col != null) col.enabled = !isBroken;
+        // 2. Změníme kolize "Intact" částí
+        foreach (var c in _intactColliders)
+        {
+            if (c != null) c.enabled = !isBroken;
+        }
+
+        // 3. Pokud existuje broken model, aktivujeme ho
+        if (_brokenModel != null)
+        {
+            _brokenModel.SetActive(isBroken);
+        }
+
+        // 4. VFX Efekty
+        if (!playVFX) return;
 
         if (isBroken)
         {
-            if (_breakVFX != null) _breakVFX.Play();
+            SpawnVFX(_breakVFXPrefab);
         }
         else
         {
-            if (_respawnVFX != null) _respawnVFX.Play();
+            SpawnVFX(_respawnVFXPrefab);
         }
+    }
+
+    private void SpawnVFX(GameObject prefab)
+    {
+        if (prefab == null) return;
+        GameObject instance = Instantiate(prefab, transform.position, transform.rotation);
+        
+        float duration = 2.0f;
+        ParticleSystem ps = instance.GetComponent<ParticleSystem>();
+        if (ps != null)
+        {
+            if (!ps.main.loop) duration = ps.main.duration + ps.main.startLifetime.constantMax;
+            else duration = 3.0f;
+        }
+        
+        AudioSource audio = instance.GetComponent<AudioSource>();
+        if (audio != null && audio.clip != null) duration = Mathf.Max(duration, audio.clip.length);
+
+        Destroy(instance, duration);
     }
 }

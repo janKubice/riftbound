@@ -88,6 +88,10 @@ public class PlayerController : NetworkBehaviour
     [SerializeField] private float _levitationHeight = 2.0f; // Jak vysoko vyletí
     [SerializeField] private float _levitationSpeed = 0.5f;  // Jak rychle tam vyletí
 
+
+    private bool _isSitting = false;
+    private float _sittingYaw = 0f; // Pro otáčení hlavy do stran bez těla
+
     private bool _isInShopMode = false;
     private float _shopGroundY; // Uložená výška podlahy
 
@@ -322,6 +326,12 @@ public class PlayerController : NetworkBehaviour
             // ale CharacterController.Move by se tu volat neměl.
             HandleAnimation();
             return;
+        }
+
+        if (_isSitting)
+        {
+            HandleSittingRotation(); // Speciální rotace pro sezení (viz bod 4)
+            return; // DŮLEŽITÉ: Ukončíme Update, takže se neprovede pohyb ani gravitace!
         }
 
         CheckGrounded();
@@ -695,6 +705,11 @@ public class PlayerController : NetworkBehaviour
             {
                 _currentJumpCount++;
 
+                if (IsOwner)
+                {
+                    SteamStatsManager.Instance.IncrementStat("stat_jumps_performed");
+                }
+
                 _playerVelocity.y = Mathf.Sqrt(_jumpHeight * -2f * _gravityValue);
 
                 // Spustíme animaci (pošleme přes server všem)
@@ -828,6 +843,12 @@ public class PlayerController : NetworkBehaviour
             _controller.Move(dodgeDirection * _dodgeSpeed * speedMultiplier * Time.deltaTime);
 
             timer += Time.deltaTime;
+
+            if (IsOwner)
+            {
+                SteamStatsManager.Instance.IncrementStat("stat_dashes_performed");
+            }
+
             yield return null; // Počkáme na další frame
         }
 
@@ -961,6 +982,57 @@ public class PlayerController : NetworkBehaviour
 
             // 3. Resetujeme rychlost, aby nevystřelil setrvačností
             _playerVelocity = Vector3.zero;
+        }
+    }
+
+    public void SetSittingState(bool isSitting)
+    {
+        _isSitting = isSitting;
+
+        // Při sednutí vynulujeme fyziku a vstupy
+        if (_isSitting)
+        {
+            _playerVelocity = Vector3.zero;
+            _moveInput = Vector2.zero;
+            _sittingYaw = 0f; // Reset pohledu doprostřed
+
+            // Reset animátoru
+            if (_animator)
+            {
+                _animator.SetFloat(_forwardSpeedHash, 0);
+                _animator.SetFloat(_rightSpeedHash, 0);
+                _animator.SetBool(_isSprintingHash, false);
+                _animator.SetBool(_isGroundedHash, true);
+            }
+        }
+        else
+        {
+            // Při stoupnutí srovnáme kameru zpět
+            if (_cameraFollowTarget != null)
+            {
+                _cameraFollowTarget.localRotation = Quaternion.Euler(_cameraPitch, 0, 0);
+            }
+        }
+    }
+
+    private void HandleSittingRotation()
+    {
+        float mouseX = _lookInput.x * _rotationSpeed * Time.deltaTime;
+        float mouseY = _lookInput.y * _rotationSpeed * Time.deltaTime;
+
+        // Místo otáčení postavy (transform.Rotate) otáčíme jen virtuální proměnnou
+        _sittingYaw += mouseX;
+
+        // Volitelné: Omezit otáčení hlavy (aby si nezlomil vaz o 360 stupňů)
+        _sittingYaw = Mathf.Clamp(_sittingYaw, -90f, 90f);
+
+        _cameraPitch -= mouseY;
+        _cameraPitch = Mathf.Clamp(_cameraPitch, _minPitch, _maxPitch);
+
+        if (_cameraFollowTarget != null)
+        {
+            // Aplikujeme rotaci X (nahoru/dolů) i Y (doleva/doprava) POUZE na kameru
+            _cameraFollowTarget.localRotation = Quaternion.Euler(_cameraPitch, _sittingYaw, 0);
         }
     }
 }

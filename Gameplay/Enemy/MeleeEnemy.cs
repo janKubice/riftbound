@@ -1,92 +1,231 @@
 using UnityEngine;
 using System.Collections;
+using Unity.Netcode;
 
+[RequireComponent(typeof(NetworkedAudioSource))]
 public class MeleeEnemy : EnemyBaseAI
 {
     [Header("Melee Stats")]
     [SerializeField] private float _attackRange = 2.0f;
     [SerializeField] private int _damage = 10;
-    [SerializeField] private float _attackCooldown = 1.5f;
-    [SerializeField] private float _attackTelegraphTime = 0.4f;
+    [SerializeField] private float _attackCooldown = 2.0f;
 
-    // OPTIMALIZACE 1: Statický buffer sdílený všemi nepřáteli
-    // Už žádné 'new Collider[]' při každém útoku!
-    private static readonly Collider[] _hitBuffer = new Collider[10];
-    
-    // OPTIMALIZACE 2: Hash animace místo stringu
-    private static readonly int AnimID_Attack = Animator.StringToHash("Attack");
+    [Header("Headbutt Animation")]
+    [Tooltip("Jak dlouho trvá nápřah (trackuje hráče)")]
+    [SerializeField] private float _windupTime = 0.6f;
+    [Tooltip("Pauza před úderem (přestane se točit - čas na úhyb)")]
+    [SerializeField] private float _lockTime = 0.1f;
+    [Tooltip("Rychlost úderu")]
+    [SerializeField] private float _strikeTime = 0.15f;
+
+    [Space]
+    [Tooltip("Záklon hlavy dozadu (záporné číslo)")]
+    [SerializeField] private float _maxLeanBackAngle = -40f;
+    [Tooltip("Předklon při úderu (kladné číslo)")]
+    [SerializeField] private float _maxHeadbuttAngle = 55f;
+    [SerializeField] private AnimationCurve _windupCurve = AnimationCurve.EaseInOut(0, 0, 1, 1);
+
+    [Header("Visual Effects")]
+    [Tooltip("Efekt nabíjení (připojí se k hlavě)")]
+    [SerializeField] private GameObject _chargeVFXPrefab;
+    [Tooltip("Efekt zásahu (krev/prach)")]
+    [SerializeField] private GameObject _hitVFXPrefab;
+    [Tooltip("Kost hlavy (pokud není, použije se root)")]
+    [SerializeField] private Transform _headTransform;
+
+    [Header("Audio")]
+    [Tooltip("Index 2 = Attack Shout")]
+    [SerializeField] private int _attackSoundIndex = 2;
+
+
+
+    // Ukládáme původní rotaci modelu (fix pro modely s offsetem)
+    private Quaternion _baseLocalRotation;
+    private Transform _visualRoot;
+    private NetworkedAudioSource _netAudio;
 
     private float _lastAttackTime;
     private bool _isAttacking = false;
-    private float _attackRangeSqr; // Předpočítaná vzdálenost
+    private float _attackRangeSqr;
 
     protected override void Awake()
     {
         base.Awake();
-        // Předpočítáme si druhou mocninu, ať nemusíme odmocňovat v Update
         _attackRangeSqr = _attackRange * _attackRange;
+        _netAudio = GetComponent<NetworkedAudioSource>();
+
+        // 1. Najdeme vizuální model
+        if (_modelRenderer != null)
+            _visualRoot = _modelRenderer.transform;
+        else
+            _visualRoot = transform.GetChild(0);
+
+        // 2. Uložíme si, jak byl model otočený v Inspectoru (KLÍČOVÁ OPRAVA)
+        _baseLocalRotation = _visualRoot.localRotation;
     }
 
-    protected override void BehaviorLogic()
+    public override void BehaviorLogic()
     {
         if (_isAttacking) return;
 
-        // OPTIMALIZACE 3: Použití sqrMagnitude místo Distance (ušetří procesor)
-        float distSqr = (transform.position - _targetPlayer.position).sqrMagnitude;
+        float distSqr = (MyTransform.position - TargetPlayer.position).sqrMagnitude;
 
         if (distSqr <= _attackRangeSqr)
         {
-            StopMovement();
-            RotateToTarget(); 
-
             if (Time.time >= _lastAttackTime + _attackCooldown)
             {
-                StartCoroutine(AttackRoutine());
+                StartCoroutine(HeadbuttAttackRoutine());
+            }
+            else
+            {
+                // Cooldown: Jen se točím na hráče
+                IsMovementPaused = true;
+                RotateTowardsTarget();
             }
         }
         else
         {
-            MoveToTarget();
+            IsMovementPaused = false; // Běžím k hráči
         }
     }
 
-    private IEnumerator AttackRoutine()
+    // Vlastní metoda pro rotaci, abychom nespoléhali na base class
+    private void RotateTowardsTarget()
+    {
+        if (TargetPlayer == null) return;
+
+        Vector3 dir = (TargetPlayer.position - transform.position).normalized;
+        dir.y = 0; // Nechceme se naklánět nahoru/dolů celým tělem
+
+        if (dir != Vector3.zero)
+        {
+            Quaternion targetRot = Quaternion.LookRotation(dir);
+            // Rychlá rotace, ale ne instantní
+            transform.rotation = Quaternion.RotateTowards(transform.rotation, targetRot, 720f * Time.deltaTime);
+        }
+    }
+
+    private IEnumerator HeadbuttAttackRoutine()
     {
         _isAttacking = true;
+        IsMovementPaused = true;
         _lastAttackTime = Time.time;
 
-        // Použití Hash ID je rychlejší než string "Attack"
-        if (_animator) _animator.SetTrigger(AnimID_Attack);
+        // --- FÁZE 1: WINDUP (Nápřah + Tracking) ---
+        // Spustíme VFX nabíjení
+        SpawnChargeVFXClientRpc();
 
-        yield return new WaitForSeconds(_attackTelegraphTime);
+        float timer = 0f;
 
-        // OPTIMALIZACE 4: NonAlloc verze fyziky
-        // Výsledek 'hitCount' nám řekne, kolik věcí jsme trefili.
-        // Data se zapíšou do existujícího pole '_hitBuffer', nevzniká žádný odpad v paměti.
-        int hitCount = Physics.OverlapSphereNonAlloc(
-            transform.position + transform.forward, 
-            1.5f, 
-            _hitBuffer,
-            LayerMask.GetMask("Player") // Pokud máš vrstvu Player, použij ji pro zrychlení! Pokud ne, smaž tento řádek.
-        );
-
-        for(int i = 0; i < hitCount; i++)
+        while (timer < _windupTime)
         {
-            var hit = _hitBuffer[i];
-            
-            // Kontrola, zda jsme netrefili sami sebe nebo jiného nepřítele (pokud nemáš LayerMask)
-            if (hit.gameObject == gameObject) continue;
+            timer += Time.deltaTime;
+            float progress = timer / _windupTime;
+            float curveVal = _windupCurve.Evaluate(progress);
 
-            if(hit.TryGetComponent(out PlayerAttributes player))
-            {
-                player.TakeDamageServerRpc(_currentDamage);
-            }
+            // Výpočet úhlu záklonu
+            float currentPitch = Mathf.Lerp(0, _maxLeanBackAngle, curveVal);
+
+            // APLIKACE ROTACE: Nejdřív Pitch, pak Base Rotation
+            // Tím zajistíme, že se nakloní "dopředu" z pohledu modelu, ať je otočený jakkoliv
+            _visualRoot.localRotation = Quaternion.Euler(currentPitch, 0, 0) * _baseLocalRotation;
+
+            // Důležité: Stále se točíme za hráčem (Tracking)
+            RotateTowardsTarget();
+
+            yield return null;
         }
 
-        // Vyčistíme reference v poli, aby nezůstaly viset v paměti (dobrá praxe)
-        for(int i = 0; i < hitCount; i++) _hitBuffer[i] = null;
+        // --- FÁZE 2: LOCK (Zamknutí cíle) ---
+        // Krátká pauza, kdy se nepřítel přestane točit.
+        // Hráč má teď šanci uskočit do strany (Skill check).
+        yield return new WaitForSeconds(_lockTime);
 
-        yield return new WaitForSeconds(0.5f);
+        // --- FÁZE 3: STRIKE (Úder) ---
+        // Zvuk útoku ("Huuuuh!")
+        if (_netAudio != null) _netAudio.PlayOneShotNetworked(_attackSoundIndex);
+
+        timer = 0f;
+        Quaternion preAttackRot = _visualRoot.localRotation;
+        // Cílová rotace (hlava dopředu + base rotace)
+        Quaternion strikeRot = Quaternion.Euler(_maxHeadbuttAngle, 0, 0) * _baseLocalRotation;
+
+        while (timer < _strikeTime)
+        {
+            timer += Time.deltaTime;
+            float progress = timer / _strikeTime;
+            // Exponenciální zrychlení (prudký úder)
+            progress = progress * progress;
+
+            _visualRoot.localRotation = Quaternion.Lerp(preAttackRot, strikeRot, progress);
+
+            // ZDE UŽ NENÍ RotateTowardsTarget() -> Útočí rovně tam, kam se díval naposled
+            yield return null;
+        }
+
+        // --- FÁZE 4: DAMAGE & IMPACT ---
+        CheckForHit();
+
+        // --- FÁZE 5: RECOVERY (Návrat) ---
+        timer = 0f;
+        float recoveryTime = 0.5f;
+        Quaternion currentRot = _visualRoot.localRotation;
+
+        while (timer < recoveryTime)
+        {
+            timer += Time.deltaTime;
+            // Pomalý návrat do základní rotace
+            _visualRoot.localRotation = Quaternion.Lerp(currentRot, _baseLocalRotation, timer / recoveryTime);
+            yield return null;
+        }
+
+        // Jistota na závěr
+        _visualRoot.localRotation = _baseLocalRotation;
+
         _isAttacking = false;
+        IsMovementPaused = false;
+    }
+
+    private void CheckForHit()
+    {
+        if (TargetPlayer == null) return;
+
+        // Získání bodu úderu (před nepřítelem)
+        Vector3 strikePoint = transform.position + transform.forward * 1.2f;
+
+        // Kvadratická vzdálenost eliminuje náročnou operaci odmocniny (Vector3.Distance)
+        float distSqr = (strikePoint - TargetPlayer.position).sqrMagnitude;
+
+        // Porovnání s druhou mocninou poloměru zásahu (1.5 * 1.5 = 2.25)
+        if (distSqr <= 2.25f)
+        {
+            if (TargetPlayer.TryGetComponent(out PlayerAttributes player))
+            {
+                player.TakeDamageServerRpc(_damage);
+
+                // Lokální aplikace VFX bez RPC
+                Vector3 hitPos = TargetPlayer.position + Vector3.up * 1.0f;
+                SpawnHitVFXClientRpc(hitPos);
+            }
+        }
+    }
+
+    [ClientRpc]
+    private void SpawnChargeVFXClientRpc()
+    {
+        if (_chargeVFXPrefab == null) return;
+        Transform spawnPoint = _headTransform != null ? _headTransform : transform;
+
+        GameObject vfx = Instantiate(_chargeVFXPrefab, spawnPoint.position, spawnPoint.rotation);
+        vfx.transform.SetParent(spawnPoint); // Připnout k hlavě
+        Destroy(vfx, _windupTime + 0.2f);
+    }
+
+    [ClientRpc]
+    private void SpawnHitVFXClientRpc(Vector3 position)
+    {
+        if (_hitVFXPrefab == null) return;
+        // Krev stříkne ve směru úderu
+        Instantiate(_hitVFXPrefab, position, Quaternion.LookRotation(transform.forward));
     }
 }

@@ -74,6 +74,7 @@ public class PlayerProgression : NetworkBehaviour
 
     public bool TrySpendGold(int amount)
     {
+        Debug.Log($"[Server SHOP DEBUG] hráč zkouší utratit {amount} goldů");
         if (!IsServer) return false;
         if (Gold.Value >= amount)
         {

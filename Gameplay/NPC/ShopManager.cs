@@ -5,193 +5,140 @@ using Unity.Netcode;
 
 public class ShopManager : MonoBehaviour
 {
-    public static ShopManager Instance; // Singleton pro přístup z UI
+    public static ShopManager Instance; // Singleton jen pro UI přístup
 
-    [Header("UI Refs")]
+    [Header("UI References")]
     [SerializeField] private GameObject _shopPanel;
     [SerializeField] private Transform _itemsContainer;
-    [SerializeField] private GameObject _itemButtonPrefab;
+    [SerializeField] private GameObject _itemButtonPrefab; // Prefab musí mít WeaponShopItemUI
     [SerializeField] private Button _sellButton;
     [SerializeField] private TextMeshProUGUI _sellButtonText;
 
-    // Cache referencí
-    private WeaponManager _localWeaponManager;
-    private PlayerProgression _localProgression;
     private NPCInteractable _currentNpc;
-    public bool IsShopOpen;
+    private PlayerShopLogic _localPlayerLogic; // Reference na konkrétního hráče
+    private WeaponManager _monitoredWeaponManager;
 
-    private void Awake() => Instance = this;
-
-    private void Start()
+    private void Awake()
     {
+        Instance = this;
         _shopPanel.SetActive(false);
-        IsShopOpen = false;
     }
 
+    // Volá se z NPCInteractable
     public void OpenShop(NPCInteractable npc)
     {
         _currentNpc = npc;
-        _localWeaponManager = NetworkManager.Singleton.LocalClient.PlayerObject.GetComponent<WeaponManager>();
-        _localProgression = NetworkManager.Singleton.LocalClient.PlayerObject.GetComponent<PlayerProgression>();
+
+        // 1. NAJDEME LOKÁLNÍHO HRÁČE (Bezpečnější než statická instance)
+        if (NetworkManager.Singleton.LocalClient != null && NetworkManager.Singleton.LocalClient.PlayerObject != null)
+        {
+            _localPlayerLogic = NetworkManager.Singleton.LocalClient.PlayerObject.GetComponent<PlayerShopLogic>();
+        }
+
+        if (_localPlayerLogic == null)
+        {
+            Debug.LogError("[ShopManager] CHYBA: Nenalezen PlayerShopLogic na lokálním hráči!");
+            return;
+        }
+
+        // --- PŘIHLÁŠENÍ K ODBĚRU ZMĚN ---
+        _monitoredWeaponManager = _localPlayerLogic.GetComponent<WeaponManager>();
+        if (_monitoredWeaponManager != null)
+        {
+            // Nasloucháme změně zbraně (předchozí hodnota, nová hodnota)
+            _monitoredWeaponManager.CurrentWeaponIndex.OnValueChanged += HandleWeaponChanged;
+        }
 
         RefreshShopUI();
         _shopPanel.SetActive(true);
-        IsShopOpen = true;
 
-        // Odemknout kurzor
+        // Odemknout myš
         Cursor.lockState = CursorLockMode.None;
         Cursor.visible = true;
     }
 
     public void CloseShop()
     {
+        // --- ODHLÁŠENÍ Z ODBĚRU (Důležité proti memory leakům) ---
+        if (_monitoredWeaponManager != null)
+        {
+            _monitoredWeaponManager.CurrentWeaponIndex.OnValueChanged -= HandleWeaponChanged;
+            _monitoredWeaponManager = null;
+        }
+
         _shopPanel.SetActive(false);
-        IsShopOpen = false;
         Cursor.lockState = CursorLockMode.Locked;
         Cursor.visible = false;
-
-        // Návrat do dialogu nebo konec?
-        // DialogueManager.Instance.EndDialogue();
     }
+
+    public bool IsShopOpen()
+    {
+        return _shopPanel.activeSelf;
+    }
+
+    private void HandleWeaponChanged(int oldIndex, int newIndex)
+    {
+        // Zbraň se změnila, aktualizujeme tlačítko pro prodej
+        if (_monitoredWeaponManager != null)
+        {
+            UpdateSellButton(_monitoredWeaponManager);
+        }
+    }
+
 
     private void RefreshShopUI()
-{
-    Debug.Log("[ShopDebug] === ZAČÍNÁM REFRESH UI OBCHODU ===");
-
-    // 1. Vyčistit stará tlačítka
-    foreach (Transform child in _itemsContainer) Destroy(child.gameObject);
-
-    // Kontrola referencí
-    if (_currentNpc == null)
     {
-        Debug.LogError("[ShopDebug] KRITICKÁ CHYBA: _currentNpc je NULL!");
-        return;
-    }
-    if (_localWeaponManager == null)
-    {
-        Debug.LogError("[ShopDebug] KRITICKÁ CHYBA: _localWeaponManager je NULL! (Hráč asi nebyl nalezen)");
-        return;
-    }
+        // Vyčistit stará tlačítka
+        foreach (Transform child in _itemsContainer) Destroy(child.gameObject);
 
-    // 2. Zjistit počet položek
-    int count = _currentNpc.WeaponIndexesForSale.Count;
-    Debug.Log($"[ShopDebug] NPC '{_currentNpc.NpcName}' má v seznamu {count} položek k prodeji.");
+        // Získat WeaponManager pro data zbraní
+        var weaponManager = _localPlayerLogic.GetComponent<WeaponManager>();
 
-    if (count == 0)
-    {
-        Debug.LogWarning("[ShopDebug] VAROVÁNÍ: Seznam zboží je PRÁZDNÝ! (Zkontroluj 'Weapon Indexes For Sale' v Inspectoru u NPC)");
-    }
-
-    // 3. Projít indexy
-    foreach (int weaponIndex in _currentNpc.WeaponIndexesForSale)
-    {
-        Debug.Log($"[ShopDebug] -> Zpracovávám Index zbraně: {weaponIndex}...");
-
-        // TADY VOLÁME TU NOVOU METODU
-        WeaponData data = _localWeaponManager.GetWeaponDataByIndex(weaponIndex);
-
-        if (data != null)
+        // Vygenerovat tlačítka pro zbraně, které NPC prodává
+        foreach (int index in _currentNpc.WeaponIndexesForSale)
         {
-            Debug.Log($"[ShopDebug]    -> DATA NALEZENA: '{data.WeaponName}' (Cena: {data.GoldPrice}). Vytvářím tlačítko.");
+            WeaponData data = weaponManager.GetWeaponDataByIndex(index);
 
-            // Vytvořit tlačítko
-            GameObject btnObj = Instantiate(_itemButtonPrefab, _itemsContainer);
-
-            // Kontrola UI viditelnosti (častá chyba)
-            if (btnObj.transform.localScale == Vector3.zero) 
-                Debug.LogWarning("[ShopDebug] POZOR: Tlačítko se vytvořilo, ale má Scale (0,0,0) -> nebude vidět!");
-
-            // Nastavit texty
-            var texts = btnObj.GetComponentsInChildren<TextMeshProUGUI>();
-            
-            if (texts.Length > 0) 
-                texts[0].text = data.WeaponName; // Název
-            else 
-                Debug.LogError("[ShopDebug] CHYBA: Prefab tlačítka nemá TextMeshProUGUI (Index 0 - Název)!");
-
-            if (texts.Length > 1) 
-                texts[1].text = $"{data.GoldPrice} G"; // Cena
-
-            // Nastavit akci na kliknutí
-            Button btn = btnObj.GetComponent<Button>();
-            if (btn != null)
+            if (data != null)
             {
-                btn.onClick.AddListener(() =>
+                GameObject btnObj = Instantiate(_itemButtonPrefab, _itemsContainer);
+                WeaponShopItemUI itemUI = btnObj.GetComponent<WeaponShopItemUI>();
+
+                // Nastavení tlačítka + Co se stane při kliknutí
+                itemUI.Setup(data, () =>
                 {
-                    Debug.Log($"[ShopDebug] Kliknuto na nákup: {data.WeaponName}");
-                    PlayerShopLogic.LocalInstance.RequestBuyWeapon(weaponIndex, data.GoldPrice);
+                    Debug.Log($"[UI] Kliknuto na {data.WeaponName}");
+                    _localPlayerLogic.ClientBuyWeapon(index, data.GoldPrice);
                 });
             }
-            else
+        }
+
+        UpdateSellButton(weaponManager);
+    }
+
+    private void UpdateSellButton(WeaponManager wm)
+    {
+        int currentWeaponIndex = wm._currentWeaponIndex.Value;
+
+        if (currentWeaponIndex != -1)
+        {
+            WeaponData currentData = wm.GetWeaponDataByIndex(currentWeaponIndex);
+            int sellPrice = currentData.GoldPrice / 2;
+
+            _sellButton.interactable = true;
+            _sellButtonText.text = $"Prodat zbraň ({sellPrice} G)";
+
+            _sellButton.onClick.RemoveAllListeners();
+            _sellButton.onClick.AddListener(() =>
             {
-                Debug.LogError("[ShopDebug] CHYBA: Prefab tlačítka nemá komponentu Button!");
-            }
+                _localPlayerLogic.ClientSellWeapon(sellPrice);
+                CloseShop(); // Volitelné zavření po prodeji
+            });
         }
         else
         {
-            Debug.LogError($"[ShopDebug]    -> CHYBA: Data jsou NULL pro index {weaponIndex}! (WeaponManager nenašel data v listu prefabs)");
+            _sellButton.interactable = false;
+            _sellButtonText.text = "Žádná zbraň";
         }
-    }
-
-    Debug.Log("[ShopDebug] === REFRESH HOTOV ===");
-    UpdateSellButton();
-}
-
-    private void UpdateSellButton()
-    {
-        // TADY VOLÁME TVOU SÍŤOVOU PROMĚNNOU
-        int currentIndex = _localWeaponManager._currentWeaponIndex.Value;
-
-        if (currentIndex != -1)
-        {
-            WeaponData currentData = _localWeaponManager.GetWeaponDataByIndex(currentIndex);
-            if (currentData != null)
-            {
-                // Prodejní cena je třeba polovina
-                int sellPrice = currentData.GoldPrice / 2;
-                _sellButton.interactable = true;
-                _sellButtonText.text = $"Sell Current ({sellPrice} G)";
-
-                _sellButton.onClick.RemoveAllListeners();
-                _sellButton.onClick.AddListener(() =>
-                {
-                    PlayerShopLogic.LocalInstance.RequestSellWeapon(sellPrice);
-                });
-                return;
-            }
-        }
-
-        _sellButton.interactable = false;
-        _sellButtonText.text = "No Weapon";
-    }
-
-    // --- LOGIKA TRANSAKCÍ (Server Calls) ---
-
-    private void OnBuyClicked(int weaponIndex, int cost)
-    {
-        // Klient ověří peníze lokálně pro UX
-        if (_localProgression.Gold.Value >= cost)
-        {
-            // Voláme ServerRPC pro transakci
-            PerformTransactionServerRpc(weaponIndex, cost, true);
-        }
-        else
-        {
-            Debug.Log("Not enough gold!");
-        }
-    }
-
-    private void OnSellClicked(int sellPrice)
-    {
-        PerformTransactionServerRpc(-1, sellPrice, false); // -1 pro odebrání zbraně (Unarmed)
-    }
-
-    [ServerRpc(RequireOwnership = false)] // Musí být v NetworkBehaviour, takže ShopManager musí být na NetworkObjectu nebo volat přes PlayerObject
-    // UPRAVENO: ShopManager je v UI (Scene object), nemůže mít ServerRpc přímo, pokud není spawnutý.
-    // ŘEŠENÍ: ServerRpc dáme na hráče (PlayerInteraction nebo nový PlayerShopController) a odsud ho jen voláme.
-    // Pro jednoduchost zde ukážu logiku, kterou přidáš do `PlayerProgression` nebo `WeaponManager`.
-    private void PerformTransactionServerRpc(int weaponIndex, int amount, bool isBuying)
-    {
-        // Přesunuto níže do PlayerShopLogic
     }
 }

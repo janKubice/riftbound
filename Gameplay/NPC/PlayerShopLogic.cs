@@ -3,30 +3,22 @@ using Unity.Netcode;
 
 public class PlayerShopLogic : NetworkBehaviour
 {
-    public static PlayerShopLogic LocalInstance { get; private set; }
     private PlayerProgression _progression;
     private WeaponManager _weaponManager;
 
     public override void OnNetworkSpawn()
     {
-        // Pokud je tento objekt můj (jsem vlastník), nastavím se jako LocalInstance
-        if (IsOwner)
-        {
-            if (LocalInstance != null) 
-            {
-                // Pojistka proti duplicitám při znovunačtení scény
-                LocalInstance = null; 
-            }
-            LocalInstance = this;
-        }
-    }
+        base.OnNetworkSpawn();
 
-    public override void OnNetworkDespawn()
-    {
-        // Úklid při odpojení/smrti
-        if (IsOwner && LocalInstance == this)
+        if (IsLocalPlayer)
         {
-            LocalInstance = null;
+            Debug.Log("--- DEBUG SÍŤOVÝCH KOMPONENT ---");
+            var behaviours = GetComponents<NetworkBehaviour>();
+            for (int i = 0; i < behaviours.Length; i++)
+            {
+                Debug.Log($"Index {i}: {behaviours[i].GetType().Name}");
+            }
+            Debug.Log("--------------------------------");
         }
     }
 
@@ -36,42 +28,81 @@ public class PlayerShopLogic : NetworkBehaviour
         _weaponManager = GetComponent<WeaponManager>();
     }
 
-    // Volá se z UI tlačítka
-    public void RequestBuyWeapon(int weaponIndex, int cost)
+    // --- KLIENT VOLÁ TOTO ---
+    public void ClientBuyWeapon(int weaponIndex, int cost)
     {
-        if (IsOwner) BuyWeaponServerRpc(weaponIndex, cost);
-    }
+        if (!IsOwner) return;
 
-    public void RequestSellWeapon(int refundAmount)
-    {
-        if (IsOwner) SellWeaponServerRpc(refundAmount);
-    }
+        // Vypíšeme, kdo volá nákup
+        Debug.Log($"[SHOP DEBUG] Volám nákup na objektu: {gameObject.name}, NetID: {NetworkObjectId}, BehaviourIndex: 17");
 
-    [ServerRpc]
-    private void BuyWeaponServerRpc(int index, int cost)
-    {
-        // 1. Ověření financí na serveru
-        if (_progression.Gold.Value >= cost)
+        // Kontrola existence
+        if (NetworkManager.Singleton.SpawnManager.SpawnedObjects.TryGetValue(NetworkObjectId, out var obj))
         {
-            // 2. Odečíst peníze
-            _progression.TrySpendGold(cost);
+            Debug.Log($"[SHOP DEBUG] Objekt {NetworkObjectId} je v Netcode zaregistrován: {obj.name}");
+        }
+        else
+        {
+            Debug.LogError($"[SHOP DEBUG] Objekt {NetworkObjectId} NENÍ v Netcode databázi!");
+        }
 
-            // 3. Vybavit zbraň (WeaponManager se postará o vizuál a výměnu)
+        if (_progression.Gold.Value < cost)
+        {
+            Debug.Log("[Shop] Nedostatek zlata (Klient check)");
+            return;
+        }
+
+        BuyWeaponServerRpc(weaponIndex, cost);
+    }
+
+    public void ClientSellWeapon(int refundAmount)
+    {
+        if (!IsOwner) return;
+        SellWeaponServerRpc(refundAmount);
+    }
+
+
+    // --- SERVER ---
+    // Musí být PUBLIC, aby se předešlo IL2CPP chybám
+    [ServerRpc]
+    public void BuyWeaponServerRpc(int index, int cost)
+    {
+        Debug.Log($"[Server SHOP DEBUG] hráč zkouší koupit {index} za {cost} zlatých");
+        // 1. Ověříme finance na serveru (autorita)
+        if (_progression.TrySpendGold(cost))
+        {
+            Debug.Log($"[Server] Hráč koupil zbraň ID {index}");
+
+            // 2. Změníme zbraň
             _weaponManager.SetWeaponOnServer(index);
+
+            // 3. Pošleme potvrzení zpět
+            PurchaseResultClientRpc(true, "Nákup úspěšný!");
+        }
+        else
+        {
+            Debug.Log($"[Server SHOP DEBUG] Nedostatek zlata na serveru!");
+            PurchaseResultClientRpc(false, "Nedostatek zlata na serveru!");
         }
     }
 
     [ServerRpc]
-    private void SellWeaponServerRpc(int amount)
+    public void SellWeaponServerRpc(int amount)
     {
-        // 1. Ověřit, že má co prodat (není -1)
         if (_weaponManager._currentWeaponIndex.Value != -1)
         {
-            // 2. Přičíst peníze
             _progression.AddGold(amount);
-
-            // 3. Nastavit Unarmed (-1)
-            _weaponManager.SetWeaponOnServer(-1);
+            _weaponManager.SetWeaponOnServer(-1); // -1 = Žádná zbraň
+            PurchaseResultClientRpc(true, "Prodej úspěšný!");
         }
+    }
+
+    // --- ODPOVĚĎ PRO KLIENTA ---
+    [ClientRpc]
+    public void PurchaseResultClientRpc(bool success, string msg)
+    {
+        if (!IsOwner) return;
+        Debug.Log($"[Shop Result] {msg}");
+        // Zde můžete napojit zvuk cinknutí mincí
     }
 }

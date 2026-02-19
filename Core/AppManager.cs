@@ -11,11 +11,13 @@ public class AppManager : PersistentSingleton<AppManager>
     public void GoToMainMenu()
     {
         SceneManager.LoadScene(MainMenuSceneName);
+        MusicManager.Instance.PlayMenuMusic();
     }
 
     public void GoToGameScene()
     {
         SceneManager.LoadScene(GameSceneName);
+        MusicManager.Instance.SetState(MusicManager.MusicState.Exploration);
     }
     public void ExitGame()
     {

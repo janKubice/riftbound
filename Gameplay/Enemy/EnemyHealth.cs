@@ -4,7 +4,6 @@ using System;
 
 public class EnemyHealth : NetworkBehaviour
 {
-
     [SerializeField] private int _maxHealth = 30;
     private int _baseMaxHealth;
     [SerializeField] private bool _isTrainingDummy = false;
@@ -15,7 +14,7 @@ public class EnemyHealth : NetworkBehaviour
     // Flag pro nesmrtelnost (Spawn fáze)
     public bool IsInvulnerable { get; set; } = false;
 
-    // Event pro AI Controller (aby věděl, že má zahrát animaci)
+    // Eventy
     public event Action OnDeath;
     public event Action<int> OnDamageTaken;
     private EnemyTier _currentTier = EnemyTier.Normal;
@@ -24,10 +23,17 @@ public class EnemyHealth : NetworkBehaviour
     [SerializeField] private LootTable _lootTable;
     [Range(0f, 1f)][SerializeField] private float _lootChance = 0.3f;
 
+    [Header("Audio")]
+    [SerializeField] private int _hurtSoundIndex = 0;
+    [SerializeField] private int _deathSoundIndex = 1;
+    private NetworkedAudioSource _netAudio;
+    private ulong _lastAttackerId = 9999;
+
     private void Awake()
     {
         _rb = GetComponent<Rigidbody>();
         _statusReceiver = GetComponent<StatusEffectReceiver>();
+        _netAudio = GetComponent<NetworkedAudioSource>();
         _baseMaxHealth = _maxHealth;
     }
 
@@ -35,7 +41,6 @@ public class EnemyHealth : NetworkBehaviour
     {
         if (IsServer)
         {
-            // Pokud je to panák, dáme mu hodně HP, aby se UI slider nezbláznil
             CurrentHealth.Value = _isTrainingDummy ? 999999 : _maxHealth;
         }
     }
@@ -45,40 +50,87 @@ public class EnemyHealth : NetworkBehaviour
         _currentTier = tier;
     }
 
+    // --- HLAVNÍ ZMĚNA ZDE ---
+    
+    /// <summary>
+    /// Veřejná metoda, kterou může zavolat kdokoliv (Klient i Server).
+    /// </summary>
     public void TakeDamage(int amount, ulong attackerId = 9999)
     {
-        // 1. Zjistíme, jestli se metoda vůbec zavolala
-        Debug.Log($"[EnemyHealth] TakeDamage zavoláno! Amount: {amount}, IsServer: {IsServer}");
-
-        if (!IsServer || IsInvulnerable)
+        // Pokud jsme Server, rovnou aplikujeme poškození
+        if (IsServer)
         {
-            Debug.Log("[EnemyHealth] Ignoruji zásah (Nejsem Server nebo jsem Invulnerable).");
+            ApplyDamageLogic(amount, attackerId);
+        }
+        // Pokud jsme Klient, musíme poprosit Server o provedení
+        else
+        {
+            RequestDamageServerRpc(amount, attackerId);
+        }
+    }
+
+    /// <summary>
+    /// RPC volání z klienta na server. 
+    /// RequireOwnership = false znamená, že to může zavolat i hráč, který nevlastní tento objekt (což je správně, hráči střílí do cizích nepřátel).
+    /// </summary>
+    [ServerRpc(RequireOwnership = false)]
+    private void RequestDamageServerRpc(int amount, ulong attackerId)
+    {
+        ApplyDamageLogic(amount, attackerId);
+    }
+
+    /// <summary>
+    /// Samotná logika poškození (běží POUZE na Serveru)
+    /// </summary>
+    private void ApplyDamageLogic(int amount, ulong attackerId)
+    {
+        // Zde už nemusíme kontrolovat !IsServer, protože sem se dostaneme jen na Serveru
+        
+        if (IsInvulnerable)
+        {
+            // Můžeme nechat log pro debug, ale bez 'IsServer' varování
+            // Debug.Log("[EnemyHealth] Zásah ignorován - Nepřítel je Invulnerable.");
             return;
         }
 
         if (!_isTrainingDummy && CurrentHealth.Value <= 0) return;
 
         CurrentHealth.Value -= amount;
+        _lastAttackerId = attackerId;
 
-        // 2. Zjistíme, jestli existuje Manažer
+        if (attackerId != 9999 && SteamStatsManager.Instance != null)
+        {
+            // Připravíme parametry, aby se zpráva poslala JEN tomu, kdo útočil
+            ClientRpcParams clientParams = new ClientRpcParams
+            {
+                Send = new ClientRpcSendParams
+                {
+                    TargetClientIds = new ulong[] { attackerId }
+                }
+            };
+
+            // Pošleme RPC konkrétnímu hráči: "Započítej si DMG"
+            SteamStatsManager.Instance.IncrementStatClientRpc("stat_total_damage", amount, clientParams);
+        }
+
+        // Vizuální čísla (spawnuje server, NetworkTransform se postará o zbytek, nebo ClientRpc v Manažerovi)
         if (DamageNumberManager.Instance != null)
         {
-            Debug.Log("[EnemyHealth] Manažer nalezen, volám SpawnDamageNumber.");
             DamageNumberManager.Instance.SpawnDamageNumber(transform.position, amount, false);
         }
-        else
-        {
-            Debug.LogError("[EnemyHealth] CHYBA: DamageNumberManager.Instance je NULL! Chybí ve scéně?");
-        }
 
+        // Zvuk
+        if (_netAudio != null) 
+            _netAudio.PlayOneShotNetworked(_hurtSoundIndex);
+            
+        // Eventy (zavolají se na serveru, pokud potřebuješ reakci u klienta, použij OnValueChanged na NetworkVariable nebo ClientRpc)
         OnDamageTaken?.Invoke(amount);
 
-        // LOGIKA SMRTI vs DUMMY
+        // LOGIKA SMRTI
         if (CurrentHealth.Value <= 0)
         {
             if (_isTrainingDummy)
             {
-                // Panák neumírá, jen resetujeme HP na max, aby to "vypadalo" nekonečně
                 CurrentHealth.Value = 999999;
             }
             else
@@ -87,6 +139,7 @@ public class EnemyHealth : NetworkBehaviour
             }
         }
     }
+    // ------------------------
 
     public void InitializeHealth(int maxHp)
     {
@@ -99,58 +152,56 @@ public class EnemyHealth : NetworkBehaviour
     {
         OnDeath?.Invoke();
 
-        // --- UPRAVENÁ LOGIKA LOOTU ---
+        if (_netAudio != null) 
+            _netAudio.PlayOneShotNetworked(_deathSoundIndex);
+
         if (IsServer && _lootTable != null && LootManager.Instance != null)
         {
-            int dropRolls = 1;       // Kolikrát se pokusíme dropnout item
-            float chanceMultiplier = 1.0f; // Zvýšení šance (pro vyšší tiery)
+            int dropRolls = 1;
+            float chanceMultiplier = 1.0f;
 
-            // Nastavení pravidel podle Tieru
             switch (_currentTier)
             {
-                case EnemyTier.Normal:
-                    dropRolls = 1;
-                    chanceMultiplier = 1.0f;
-                    break;
-                case EnemyTier.Elite:
-                    dropRolls = 2; // Elite zkusí dropnout 2x
-                    chanceMultiplier = 1.2f; // +20% šance
-                    break;
-                case EnemyTier.Champion:
-                    dropRolls = 3;
-                    chanceMultiplier = 1.5f;
-                    break;
-                case EnemyTier.Boss:
-                    dropRolls = 5; // Boss vyhodí hromadu věcí
-                    chanceMultiplier = 10.0f; // Garantovaný drop (pokud base chance není 0)
-                    break;
+                case EnemyTier.Normal: dropRolls = 1; chanceMultiplier = 1.0f; break;
+                case EnemyTier.Elite: dropRolls = 2; chanceMultiplier = 1.2f; break;
+                case EnemyTier.Champion: dropRolls = 3; chanceMultiplier = 1.5f; break;
+                case EnemyTier.Boss: dropRolls = 5; chanceMultiplier = 10.0f; break;
             }
 
-            // Smyčka pro dropování
             for (int i = 0; i < dropRolls; i++)
             {
-                // Upravená šance
-                float currentChance = _lootChance * chanceMultiplier;
-
-                // Pokud je šance > 1, dropne vždy.
-                if (UnityEngine.Random.value < currentChance)
+                if (UnityEngine.Random.value < _lootChance * chanceMultiplier)
                 {
-                    // Malý rozptyl pozice, aby itemy nepadly přesně na sebe
                     Vector3 randomOffset = new Vector3(
                         UnityEngine.Random.Range(-0.5f, 0.5f),
                         0.5f,
                         UnityEngine.Random.Range(-0.5f, 0.5f)
                     );
-
                     LootManager.Instance.SpawnLoot(transform.position + randomOffset, _lootTable);
                 }
             }
         }
-        // -----------------------------
 
         if (_rb != null) _rb.isKinematic = true;
         var col = GetComponent<Collider>();
         if (col != null) col.enabled = false;
+
+        if (_lastAttackerId != 9999 && SteamStatsManager.Instance != null)
+        {
+            // Připravíme parametry, aby se zpráva poslala JEN tomu, kdo útočil
+            ClientRpcParams clientParams = new ClientRpcParams
+            {
+                Send = new ClientRpcSendParams
+                {
+                    TargetClientIds = new ulong[] { _lastAttackerId }
+                }
+            };
+
+            // Pošleme RPC konkrétnímu hráči: "Započítej si DMG"
+            SteamStatsManager.Instance.IncrementStatClientRpc("stat_total_damage", 1, clientParams);
+        }
+        
+        DestroySelf(); // Volání úklidu
     }
 
     public void ApplyKnockback(Vector3 force)
@@ -162,30 +213,20 @@ public class EnemyHealth : NetworkBehaviour
     public void ApplyStatusEffect(StatusEffectData effectData)
     {
         if (!IsServer || IsInvulnerable || _statusReceiver == null) return;
-
-        // Receiver se postará o coroutiny, vizuály i damage ticky
         _statusReceiver.ApplyStatusEffect(effectData);
     }
 
-    // Tuto metodu zavolá AI Controller až skončí animace smrti
     public void DestroySelf()
     {
         if (!IsServer) return;
 
-        // PŮVODNĚ: gameObject.NetDestroy();
-
-        // NOVĚ: Vrátíme objekt do Poolu
         var netObj = GetComponent<NetworkObject>();
-
         if (netObj != null && netObj.IsSpawned)
         {
-            // Parametr 'true' normálně ničí objekt, ale díky našemu Handleru
-            // ho to pouze vypne a vrátí do PoolManagera.
-            netObj.Despawn(true);
+            netObj.Despawn(true); // Vypnutí a návrat do poolu
         }
         else
         {
-            // Fallback pro případ, že testuješ offline bez sítě
             Destroy(gameObject);
         }
     }

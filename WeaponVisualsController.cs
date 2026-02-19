@@ -99,12 +99,12 @@ public class WeaponVisualsController : MonoBehaviour
         return pooled;
     }
 
-    public void UpdateLaserVisual(bool isFiring, Vector3 targetPoint)
+    public void UpdateLaserVisual(bool isFiring, Vector3 targetPoint, Vector3 normal)
     {
         if (!_isLaserWeapon)
         {
             // Pokud se toto vypisuje, nemáš zaškrtnuté "Is Continuous" ve WeaponData!
-            Debug.LogWarning("Není označeno jako LaserWeapon!"); 
+            Debug.LogWarning("Není označeno jako LaserWeapon!");
             return;
         }
 
@@ -117,7 +117,7 @@ public class WeaponVisualsController : MonoBehaviour
         if (isFiring)
         {
             // Aktualizujeme pozici laseru (Start = hlaveň, Konec = vypočítaný bod)
-            _activeLaserInstance.UpdateBeam(_currentSpawnPoint.position, targetPoint);
+            _activeLaserInstance.UpdateBeam(_currentSpawnPoint.position, targetPoint, normal);
         }
         else
         {

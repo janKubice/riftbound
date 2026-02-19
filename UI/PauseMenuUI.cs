@@ -1,62 +1,183 @@
 using UnityEngine;
 using UnityEngine.UI;
-using RogueDeckCoop.Networking;
+using TMPro;
 using Unity.Netcode;
+using RogueDeckCoop.Networking;
+using System.Collections.Generic;
+using UnityEngine.InputSystem;
 
 public class PauseMenuUI : MonoBehaviour
 {
-    [SerializeField] private Button _returnToMenuButton;
+    [Header("Panels")]
+    [SerializeField] private GameObject _menuRoot;
+    [SerializeField] private GameObject _buttonsPanel;
+    [SerializeField] private GameObject _settingsPanel;
+    [SerializeField] private GameObject _confirmationPanel;
+    [SerializeField] private GameObject _adminPanel; // Panel se seznamem hráčů
 
-    // Panel, který tento skript ovládá (sám sebe)
-    private GameObject _pausePanel;
+    [Header("Confirmation UI")]
+    [SerializeField] private TextMeshProUGUI _confirmationText;
+    [SerializeField] private Button _confirmYesButton;
+    [SerializeField] private Button _confirmNoButton;
 
-    private bool _isPaused = false;
+    [Header("Admin UI")]
+    [SerializeField] private Transform _playerListContent;
+    [SerializeField] private GameObject _kickButtonPrefab; // Prefab tlačítka se jménem hráče a "X"
 
-    private void Awake()
+    private bool _isOpen = false;
+    private bool _isHost = false;
+
+    private void Start()
     {
-        _pausePanel = this.gameObject;
-        _returnToMenuButton.onClick.AddListener(OnReturnToMenuClicked);
+        _menuRoot.SetActive(false);
+        _settingsPanel.SetActive(false);
+        _confirmationPanel.SetActive(false);
 
-        // Začít skrytý
-        _pausePanel.SetActive(false);
+        _isHost = NetworkManager.Singleton.IsHost;
+        if (_adminPanel != null) _adminPanel.SetActive(_isHost); // Admin panel jen pro hosta
     }
 
     private void Update()
     {
-        // Otevření menu
-        if (Input.GetKeyDown(KeyCode.Escape))
+        if (Keyboard.current != null && Keyboard.current.escapeKey.wasPressedThisFrame)
         {
-            TogglePauseMenu();
+            ToggleMenu();
         }
     }
 
-    public void TogglePauseMenu()
+    public void ToggleMenu()
     {
-        _isPaused = !_isPaused;
-        _pausePanel.SetActive(_isPaused);
+        if (_settingsPanel.activeSelf || _confirmationPanel.activeSelf)
+        {
+            ShowMainButtons();
+            return;
+        }
 
-        // Pozastavení hry (Funguje POUZE v single-playeru!)
-        // V Fázi 3 (síť) se toto musí řešit zprávou Hostiteli.
-        Time.timeScale = _isPaused ? 0f : 1f;
+        _isOpen = !_isOpen;
+        _menuRoot.SetActive(_isOpen);
+
+        Cursor.lockState = _isOpen ? CursorLockMode.None : CursorLockMode.Locked;
+        Cursor.visible = _isOpen;
+
+        if (_isOpen)
+        {
+            ShowMainButtons();
+            // RefreshPlayerList voláme jen pokud jsme připojení a jsme Host
+            if (_isHost && NetworkManager.Singleton != null && NetworkManager.Singleton.IsServer)
+            {
+                RefreshPlayerList();
+            }
+        }
+
+        // --- OPRAVA CHYBY ZDE ---
+        // Musíme zkontrolovat IsSpawned, jinak RPC vyhodí výjimku
+        if (GameManager.Instance != null && GameManager.Instance.IsSpawned)
+        {
+            GameManager.Instance.SetPlayerInMenuServerRpc(_isOpen);
+        }
+        else
+        {
+            // Pokud hrajeme offline nebo se teprve připojujeme, jen vypíšeme log
+            // (Hra se síťově nepauzne, což je v pořádku, protože nejsme na síti)
+            Debug.LogWarning("GameManager is not spawned yet via Netcode. RPC skipped.");
+        }
     }
 
-    // V PauseMenuUI.cs -> OnReturnToMenuClicked()
-    private void OnReturnToMenuClicked()
+    private void ShowMainButtons()
     {
-        Time.timeScale = 1f;
+        _buttonsPanel.SetActive(true);
+        _settingsPanel.SetActive(false);
+        _confirmationPanel.SetActive(false);
+    }
 
-        // Vypneme NGO session
-        if (NetworkManager.Singleton != null)
+    // --- BUTTON CALLBACKS ---
+
+    public void OnResumeClicked() => ToggleMenu();
+
+    public void OnSettingsClicked()
+    {
+        _buttonsPanel.SetActive(false);
+        _settingsPanel.SetActive(true);
+    }
+
+    public void OnExitClicked()
+    {
+        _buttonsPanel.SetActive(false);
+        _confirmationPanel.SetActive(true);
+
+        if (_isHost)
         {
-            NetworkManager.Singleton.Shutdown();
+            _confirmationText.text = "Jsi HOST. Ukončením hry vykopneš všechny hráče.\nOpravdu ukončit?";
+            _confirmYesButton.onClick.RemoveAllListeners();
+            _confirmYesButton.onClick.AddListener(ConfirmExitAsHost);
+        }
+        else
+        {
+            _confirmationText.text = "Opravdu chceš opustit hru?\nTvůj postup bude uložen.";
+            _confirmYesButton.onClick.RemoveAllListeners();
+            _confirmYesButton.onClick.AddListener(ConfirmExitAsClient);
         }
 
-        // Odpojíme se z lobby
-        if (SteamManager.Instance != null)
+        _confirmNoButton.onClick.RemoveAllListeners();
+        _confirmNoButton.onClick.AddListener(ShowMainButtons);
+    }
+
+    // --- EXIT LOGIC ---
+
+    private void ConfirmExitAsClient()
+    {
+        // 1. Uložit postavu (lokálně nebo request na server)
+        if (PlayerAttributes.LocalInstance != null)
         {
-            SteamManager.Instance.LeaveLobby();
+            PlayerAttributes.LocalInstance.SavePlayerData();
         }
 
+        // 2. Opustit lobby a síť
+        GameManager.Instance.SetPlayerInMenuServerRpc(false); // Aby se hra odpauzla po mém odchodu
+        SteamManager.Instance.LeaveLobby();
         AppManager.Instance.GoToMainMenu();
+    }
+
+    private void ConfirmExitAsHost()
+    {
+        // Host ukončuje celou session
+        GameManager.Instance.RequestEndGameServerRpc();
+    }
+
+    // --- ADMIN LOGIC (Kick) ---
+
+    private void RefreshPlayerList()
+    {
+        // Vyčistit starý list
+        foreach (Transform child in _playerListContent) Destroy(child.gameObject);
+
+        // Naplnit aktuálními hráči
+        foreach (var client in NetworkManager.Singleton.ConnectedClientsList)
+        {
+            ulong id = client.ClientId;
+
+            // Nevypisovat sebe (Hosta) v seznamu na vyhození
+            if (id == NetworkManager.Singleton.LocalClientId) continue;
+
+            GameObject btnObj = Instantiate(_kickButtonPrefab, _playerListContent);
+
+            // Nastavení textu (Jméno zatím Player ID, dokud nebudeš mít sync jmen v GameScene)
+            var textComp = btnObj.GetComponentInChildren<TextMeshProUGUI>();
+            if (textComp) textComp.text = $"Player {id}";
+
+            // Nastavení tlačítka
+            var btnComp = btnObj.GetComponentInChildren<Button>();
+            if (btnComp)
+            {
+                btnComp.onClick.AddListener(() => OnKickPlayerClicked(id));
+            }
+        }
+    }
+
+    private void OnKickPlayerClicked(ulong targetId)
+    {
+        GameManager.Instance.KickPlayerServerRpc(targetId);
+        // Refresh listu po krátké prodlevě
+        Invoke(nameof(RefreshPlayerList), 0.5f);
     }
 }

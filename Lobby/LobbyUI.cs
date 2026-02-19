@@ -5,6 +5,7 @@ using Unity.Netcode;
 using RogueDeckCoop.Networking;
 using Steamworks;
 using System.Collections.Generic;
+using System.Collections;
 
 public class LobbyUI : MonoBehaviour
 {
@@ -33,14 +34,10 @@ public class LobbyUI : MonoBehaviour
 
     private int _localSelectionIndex = 0;
 
-    private void Start()
+    private IEnumerator Start()
     {
-        // 1. Ošetření, pokud manager ještě není ready (pro jistotu)
-        if (_roomManager == null)
-        {
-            Debug.LogError("LobbyRoomManager is not assigned in LobbyUI!");
-            return;
-        }
+        yield return new WaitUntil(() => _roomManager != null && _roomManager.IsSpawned);
+        
         _roomManager.LobbyPlayers.OnListChanged += HandleLobbyPlayersChanged;
 
         // Button Listeners

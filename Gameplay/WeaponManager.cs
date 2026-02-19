@@ -20,6 +20,9 @@ public class WeaponManager : NetworkBehaviour
     [SerializeField] private WeaponAnimationData _unarmedAnimations;
     [SerializeField] private AttackLogic _unarmedAttackLogic; // Přetáhněte sem MeleeAttack SO
 
+    [Header("Audio")]
+    [SerializeField] private AudioSource _weaponAudioSource;
+
     // Aktuálně vybavený objekt
     private GameObject _currentWeaponInstance;
     [SerializeField] private WeaponStats _currentRuntimeStats;
@@ -28,11 +31,11 @@ public class WeaponManager : NetworkBehaviour
     public WeaponData CurrentWeaponData => _currentWeaponData;
     private AnimatorOverrideController _animOverrideController;
     [SerializeField] private Animator _animator;
-    private PlayerAudio _playerAudio;
 
     // Síťová proměnná, která říká, jaký prefab zbraně se má zobrazit (index do seznamu _weaponPrefabs)
     // -1 znamená beze zbraně (unarmed)
     public NetworkVariable<int> _currentWeaponIndex = new NetworkVariable<int>(-1, NetworkVariableReadPermission.Everyone, NetworkVariableWritePermission.Server);
+    public NetworkVariable<int> CurrentWeaponIndex => _currentWeaponIndex;
     private NetworkVariable<bool> _isContinuousFiring = new NetworkVariable<bool>(false, NetworkVariableReadPermission.Everyone, NetworkVariableWritePermission.Server);
     private float _lastAttackTime = -999f;
 
@@ -45,7 +48,12 @@ public class WeaponManager : NetworkBehaviour
         {
             _animOverrideController = new AnimatorOverrideController(_animator.runtimeAnimatorController);
             _animator.runtimeAnimatorController = _animOverrideController;
-            _playerAudio = GetComponent<PlayerAudio>();
+            if (_weaponAudioSource == null)
+            {
+                _weaponAudioSource = GetComponent<AudioSource>();
+                if (_weaponAudioSource == null) _weaponAudioSource = gameObject.AddComponent<AudioSource>();
+            }
+            _weaponAudioSource.spatialBlend = 1.0f;
             _visuals = GetComponent<WeaponVisualsController>();
 
             _currentWeaponIndex.OnValueChanged += OnWeaponChanged;
@@ -109,15 +117,15 @@ public class WeaponManager : NetworkBehaviour
             if (_isContinuousFiring.Value)
             {
                 // 3. Vypočítáme, kam laser dopadá
-                Vector3 endPos = CalculateLaserEndPoint();
+                Vector3 endPos = CalculateLaserEndPoint(out Vector3 hitNormal);
 
                 // 4. Řekneme vizuálu, ať se tam vykreslí
-                _visuals.UpdateLaserVisual(true, endPos);
+                _visuals.UpdateLaserVisual(true, endPos, hitNormal);
             }
             else
             {
                 // Pokud se nestřílí, laser vypneme
-                _visuals.UpdateLaserVisual(false, Vector3.zero);
+                _visuals.UpdateLaserVisual(false, Vector3.zero, new Vector3(0,0,0));
             }
         }
     }
@@ -242,6 +250,14 @@ public class WeaponManager : NetworkBehaviour
         {
             _visuals.OnAttackVisual(cooldown);
         }
+
+        // AUDIO: Přehrát zvuk výstřelu definovaný v datech zbraně
+        if (_currentWeaponData != null && _currentWeaponData.FireSound != null)
+        {
+            // PlayOneShot umožňuje překrývání zvuků (rychlá střelba)
+            _weaponAudioSource.PlayOneShot(_currentWeaponData.FireSound, _currentWeaponData.FireVolume);
+        }
+
     }
 
     public void SpawnMeleeImpact(Vector3 position)
@@ -260,6 +276,14 @@ public class WeaponManager : NetworkBehaviour
         if (_currentWeaponData != null && _currentWeaponData.HitVFXPrefab != null)
         {
             Instantiate(_currentWeaponData.HitVFXPrefab, position, Quaternion.identity);
+        }
+
+        // AUDIO: Přehrát zvuk dopadu na místě zásahu
+        if (_currentWeaponData != null && _currentWeaponData.ImpactSound != null)
+        {
+            // PlayClipAtPoint vytvoří dočasný objekt na dané pozici, přehraje zvuk a zničí se.
+            // Ideální pro zvuky v dálce (laser trefí zeď 20m daleko).
+            AudioSource.PlayClipAtPoint(_currentWeaponData.ImpactSound, position, _currentWeaponData.ImpactVolume);
         }
 
         Collider[] enviroHits = Physics.OverlapSphere(position, 2.0f); // Radius 2 metry
@@ -447,14 +471,14 @@ public class WeaponManager : NetworkBehaviour
     }
 
     [ServerRpc]
-    public void SpawnLaserServerRpc(Vector3 startPoint, Vector3 endPoint)
+    public void SpawnLaserServerRpc(Vector3 startPoint, Vector3 endPoint, Vector3 normal)
     {
         // Server to rozešle všem klientům
-        SpawnLaserClientRpc(startPoint, endPoint);
+        SpawnLaserClientRpc(startPoint, endPoint, normal);
     }
 
     [ClientRpc]
-    private void SpawnLaserClientRpc(Vector3 startPoint, Vector3 endPoint)
+    private void SpawnLaserClientRpc(Vector3 startPoint, Vector3 endPoint, Vector3 normal)
     {
         // 1. Získáme prefab pro vizuál (použijeme MuzzleFlashPrefab z WeaponData jako "Laser Prefab")
         if (_currentWeaponData != null && _currentWeaponData.MuzzleFlashPrefab != null)
@@ -465,7 +489,7 @@ public class WeaponManager : NetworkBehaviour
             // 2. Nastavíme mu pozice
             if (laserInstance.TryGetComponent(out LaserBeamVFX laserScript))
             {
-                laserScript.UpdateBeam(startPoint, endPoint);
+                laserScript.UpdateBeam(startPoint, endPoint, normal);
             }
             else
             {
@@ -486,10 +510,14 @@ public class WeaponManager : NetworkBehaviour
         _isContinuousFiring.Value = isFiring;
     }
 
-    private Vector3 CalculateLaserEndPoint()
+    private Vector3 CalculateLaserEndPoint(out Vector3 normal)
     {
         Transform startT = GetFirePoint();
-        if (startT == null) return transform.position;
+        if (startT == null)
+        {
+            normal = Vector3.zero; // Musíme vždy něco přiřadit
+            return transform.position;
+        }
 
         Vector3 start = startT.position;
         Vector3 dir = startT.forward;
@@ -498,26 +526,26 @@ public class WeaponManager : NetworkBehaviour
         if (_aiming != null)
         {
             Vector3 target = _aiming.CurrentAimPoint;
-            // Ošetření, aby dir nebyl zero vector
             Vector3 targetDir = (target - start).normalized;
             if (targetDir != Vector3.zero) dir = targetDir;
         }
 
         float range = _currentWeaponData.BaseStats.Range > 0 ? _currentWeaponData.BaseStats.Range : 50f;
 
-        // OPRAVA: Použijeme RaycastAll a vyfiltrujeme sebe
         RaycastHit[] hits = Physics.RaycastAll(start, dir, range, ~0, QueryTriggerInteraction.Ignore);
         System.Array.Sort(hits, (a, b) => a.distance.CompareTo(b.distance));
 
         foreach (var hit in hits)
         {
-            // Klíčová kontrola: Pokud je trefený objekt součástí mého hráče (stejný root), ignoruj ho
             if (hit.transform.root == transform.root) continue;
 
-            return hit.point; // První cizí překážka
+            // 1. Trefili jsme překážku -> uložíme normálu
+            normal = hit.normal;
+            return hit.point;
         }
 
-        // Nic jsme netrefili -> laser do nekonečna
+        // 2. Netrefili jsme nic -> normála je nula (nebo směr zpět k hráči, pokud chceš efekt i ve vzduchu)
+        normal = Vector3.zero;
         return start + (dir * range);
     }
 

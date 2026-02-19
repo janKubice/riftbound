@@ -309,7 +309,7 @@ public class PlayerAttributes : NetworkBehaviour
             if (ArenaManager.Instance != null && ArenaManager.Instance.IsPlayerInArena(OwnerClientId))
             {
                 ArenaManager.Instance.OnPlayerDiedInArena(OwnerClientId);
-                
+
                 // Reset atributů pro stav v lobby
                 CurrentHealth.Value = MaxHealth.Value;
                 CurrentStamina.Value = MaxStamina.Value;
@@ -379,6 +379,24 @@ public class PlayerAttributes : NetworkBehaviour
         }
     }
 
+    /// <summary>
+    /// Uloží stav postavy (HP, inventář, pozici).
+    /// Volat před odpojením nebo při ukončení hry.
+    /// </summary>
+    public void SavePlayerData()
+    {
+        if (!IsOwner && !IsServer) return;
+
+        Debug.Log($"[PlayerAttributes] Saving data for Client {OwnerClientId}...");
+
+        // TODO: Implementace ukládání (JSON, Binary, PlayerPrefs...)
+        // Příklad:
+        // SaveSystem.Save(new PlayerSaveData { 
+        //    Health = CurrentHealth.Value, 
+        //    Stamina = CurrentStamina.Value 
+        // });
+    }
+
     // --- Debug / Input Test ---
     private void Update()
     {
@@ -392,7 +410,7 @@ public class PlayerAttributes : NetworkBehaviour
             {
                 TakeDamageServerRpc(10);
             }
-            
+
             // Test spotřeby staminy (nová metoda)
             if (Keyboard.current.lKey.wasPressedThisFrame)
             {

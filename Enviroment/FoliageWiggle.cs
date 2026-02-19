@@ -5,7 +5,7 @@ public class FoliageWiggle : MonoBehaviour
 {
     [Header("Nastavení")]
     [SerializeField] private ParticleSystem _leavesParticles; // Volitelné
-    [SerializeField] private Transform _modelTransform;
+    private Transform _modelTransform;
     [SerializeField] private float _shakeAmount = 10f;
     [SerializeField] private float _shakeSpeed = 15f;
     [SerializeField] private float _recoverySpeed = 5f;

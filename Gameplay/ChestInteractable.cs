@@ -133,10 +133,27 @@ public class ChestInteractable : NetworkBehaviour, IInteractable
         // takže můžeme číst novou hodnotu.
         if (_isOpen.Value)
         {
-            // Právě se otevřela
+            // --- OTEVŘENO ---
             _networkedAudio.PlayOneShotNetworked(_openSoundIndex);
 
-            // Zde by server mohl dát hráči 'interactor' itemy...
+            // INTEGRACE STEAM STATŮ:
+            // Zjistíme, kdo interagoval
+            ulong playerClientId = interactor.OwnerClientId;
+
+            // Pokud manager existuje, pošleme tomu konkrétnímu hráči příkaz
+            if (SteamStatsManager.Instance != null)
+            {
+                ClientRpcParams clientParams = new ClientRpcParams
+                {
+                    Send = new ClientRpcSendParams
+                    {
+                        TargetClientIds = new ulong[] { playerClientId }
+                    }
+                };
+
+                // Pošleme RPC: "Hej ty tam, právě jsi otevřel bednu, zapiš si to."
+                SteamStatsManager.Instance.IncrementStatClientRpc("stat_chests_opened", 1, clientParams);
+            }
         }
         else
         {

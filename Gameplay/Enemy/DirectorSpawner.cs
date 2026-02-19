@@ -90,6 +90,7 @@ public class DirectorSpawner : NetworkBehaviour
 
     private void Update()
     {
+        updateUI();
         if (!IsServer) return;
 
         // 1. Logika Safe Zóny (Throttled check)
@@ -400,11 +401,17 @@ public class DirectorSpawner : NetworkBehaviour
 
     private void updateUI()
     {
-        diffText.text = "Difficulty: " + _totalCredits.ToString();
+        if (diffText == null) return;
+
+        // Optimalizace: SetText zabraňuje vytváření nových stringů v paměti (GC Alloc).
+        // {0:F1} = Formát čísla na 1 desetinné místo (např. "150.5")
+        // {0:N0} = Pokud preferuješ celá čísla s oddělovačem tisíců (např. "1,250")
+        diffText.SetText("Difficulty: <color=red>{0:F1}</color>", _totalCredits);
     }
 
     private void OnGUI()
     {
+        return;
         if (!IsServer) return;
 
         GUILayout.BeginArea(new Rect(10, 10, 300, 500));

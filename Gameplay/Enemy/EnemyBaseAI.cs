@@ -5,7 +5,6 @@ using System.Collections;
 
 [RequireComponent(typeof(NavMeshAgent))]
 [RequireComponent(typeof(EnemyHealth))]
-[RequireComponent(typeof(Rigidbody))]
 public abstract class EnemyBaseAI : NetworkBehaviour
 {
     [Header("Base Settings")]
@@ -13,27 +12,22 @@ public abstract class EnemyBaseAI : NetworkBehaviour
     [SerializeField] protected float _rotationSpeed = 720f;
     [SerializeField] protected float _spawnDuration = 0.1f; // Kratší spawn, když není animace
     [SerializeField] protected EnemyTier _tier = EnemyTier.Normal;
+    [HideInInspector] public Transform TargetPlayer;
+    [HideInInspector] public Transform MyTransform;
     protected int _baseDamage;
     protected int _currentDamage;
     protected float _currentSpeed;
     protected float _currentAttackRate = 1.0f;     // Útoky za sekundu
     protected float _knockbackResistance = 0f;     // 0 = plný odlet, 1 = ani se nehne
     protected int _xpReward = 0;
-
+    public Vector3 _targetOffset;
     [Header("References")]
-    // ZMĚNA: Není povinné, může zůstat prázdné
-    [SerializeField] protected Animator _animator;
 
     protected NavMeshAgent _agent;
     protected EnemyHealth _health;
     protected Transform _targetPlayer;
     protected NetworkVariable<bool> _isSpawning = new NetworkVariable<bool>(true);
 
-    private float _lastSearchTime;
-    private const float SEARCH_INTERVAL = 0.15f;
-    private float _pathUpdateTimer;
-    private float _currentPathUpdateInterval = 0.2f;
-    private Vector3 _lastPos;
 
     [Header("Visuals")]
     // Pokud máš model jako dítě objektu, přiřaď ho sem v Inspectoru nebo ho najdeme v Awake
@@ -41,19 +35,16 @@ public abstract class EnemyBaseAI : NetworkBehaviour
     
     // Optimalizace: Umožňuje měnit barvu bez duplikace materiálu (Draw Call Batching)
     private MaterialPropertyBlock _propBlock;
-
-
+    // Flag pro Manager: Pokud je TRUE, Manager tento frame ignoruje pohyb
+    public bool IsMovementPaused { get; set; } = false;
+    [HideInInspector] public Vector3 CachedSeparation = Vector3.zero;
     protected virtual void Awake()
     {
         _agent = GetComponent<NavMeshAgent>();
         _health = GetComponent<EnemyHealth>();
-        _pathUpdateTimer = Time.time + Random.Range(0f, 0.1f);
+        MyTransform = transform;
         if (_agent != null)
         {
-            _agent.acceleration = 60f; // Rychlý rozjezd (default je 8)
-            _agent.angularSpeed = 720f; // Rychlé otáčení agenta (pokud ho řídí NavMesh)
-            _agent.autoBraking = false; // Nezastavovat před cílem, pokud to neřídíme manuálně
-            _agent.obstacleAvoidanceType = ObstacleAvoidanceType.NoObstacleAvoidance; // Pro hordy entit šetří CPU
         }
 
         _propBlock = new MaterialPropertyBlock();
@@ -62,13 +53,39 @@ public abstract class EnemyBaseAI : NetworkBehaviour
         {
             _modelRenderer = GetComponentInChildren<Renderer>();
         }
+
+        if (_agent != null)
+        {
+            _agent.updatePosition = false; // Manuální synchronizace pozice
+            _agent.updateRotation = false; // Manuální rotace
+            _agent.updateUpAxis = false;   // Necháme true jen pokud je terén extrémně kopcovitý, jinak false
+            _agent.obstacleAvoidanceType = ObstacleAvoidanceType.NoObstacleAvoidance; // Vypne drahé RVO
+            _agent.acceleration = 60f; // Rychlý rozjezd (default je 8)
+            _agent.angularSpeed = 720f; // Rychlé otáčení agenta (pokud ho řídí NavMesh)
+            _agent.autoBraking = false; // Nezastavovat před cílem, pokud to neřídíme manuálně
+            _agent.obstacleAvoidanceType = ObstacleAvoidanceType.NoObstacleAvoidance; // Pro hordy entit šetří CPU
+
+        }
+        _targetOffset = new Vector3(Random.Range(-0.5f, 0.5f), 0, Random.Range(-0.5f, 0.5f));
     }
 
     public override void OnNetworkSpawn()
     {
-        _lastPos = transform.position;
         if (IsServer)
         {
+
+            // Reset stavu
+            _isSpawning.Value = true;
+            
+            // Registrace do Managera (pokud existuje)
+            if (EnemyMovementManager.Instance != null)
+            {
+                EnemyMovementManager.Instance.RegisterEnemy(this);
+            }
+            else
+            {
+                Debug.LogError("EnemyMovementManager chybí ve scéně! AI se nebude hýbat.");
+            }
             ResetEnemyState();
 
             _health.OnDeath -= HandleDeath;
@@ -94,6 +111,9 @@ public abstract class EnemyBaseAI : NetworkBehaviour
         {
             _health.OnDeath -= HandleDeath;
             _health.OnDamageTaken -= HandleDamage;
+
+            if (EnemyMovementManager.Instance != null)
+                EnemyMovementManager.Instance.UnregisterEnemy(this);
         }
     }
 
@@ -103,7 +123,6 @@ public abstract class EnemyBaseAI : NetworkBehaviour
         if (_agent != null)
         {
             _agent.isStopped = true;
-            _agent.ResetPath(); // Zahoď starou cestu
             _agent.enabled = false; // Vypni komponentu
         }
 
@@ -122,68 +141,49 @@ public abstract class EnemyBaseAI : NetworkBehaviour
 
         var col = GetComponent<Collider>();
         if (col != null) col.enabled = true;
+    }
 
-        // Reset Animatoru
-        if (_animator != null)
+    private IEnumerator SpawnRoutine()
+    {
+        // Efekt vynoření ze země
+        float timer = 0f;
+        Vector3 endScale = Vector3.one;
+        Vector3 startScale = Vector3.zero;
+
+        while (timer < _spawnDuration)
         {
-            _animator.Rebind();
-            _animator.Update(0f);
+            timer += Time.deltaTime;
+            float progress = timer / _spawnDuration;
+            
+            // Easing (SmoothStep)
+            progress = progress * progress * (3f - 2f * progress);
+            
+            MyTransform.localScale = Vector3.Lerp(startScale, endScale, progress);
+            yield return null;
         }
-    }
 
-    protected virtual IEnumerator SpawnRoutine()
-    {
-        // ZMĚNA: Kontrola null před použitím
-        if (_animator != null) _animator.SetTrigger("Spawn");
-
-        // Pokud nemáme animaci, počkáme jen chvilku, aby se stihly inicializovat věci
-        yield return new WaitForSeconds(_spawnDuration);
-
-        _health.IsInvulnerable = false;
-        _isSpawning.Value = false;
-    }
-
-
-    protected virtual void Update()
-    {
-        // 1. Společné kontroly (pokud je mrtvý nebo se spawnuje, nic neděláme)
-        if (_health.CurrentHealth.Value <= 0 || _isSpawning.Value) return;
-
-        // 2. SERVER LOGIKA (AI, Pathfinding)
+        MyTransform.localScale = endScale;
+        
         if (IsServer)
         {
-            if (Time.time > _lastSearchTime + SEARCH_INTERVAL)
-            {
-                FindClosestPlayer();
-                _lastSearchTime = Time.time;
-            }
-
-            if (_targetPlayer != null)
-            {
-                BehaviorLogic();
-
-                if (_animator != null)
-                {
-                    _animator.SetBool("Moving", _agent.velocity.magnitude > 0.1f);
-                }
-            }
+            _isSpawning.Value = false;
         }
-        // 3. KLIENT LOGIKA (Tvoje interpolace rotace)
-        else
+    }
+
+
+    /// <summary>
+    /// Hlavní smyčka pro logiku útoku. Pohyb je řešen externě,
+    /// ale útočení a cooldowny si řeší každá instance sama.
+    /// </summary>
+    protected virtual void Update()
+    {
+        if (!IsServer || _isSpawning.Value) return;
+
+        // Pokud máme cíl a jsme naživu, vykonáváme logiku chování (útoky)
+        if (TargetPlayer != null)
         {
-            // Vypočítáme směr pohybu z rozdílu pozic
-            Vector3 movementDir = (transform.position - _lastPos).normalized;
-
-            // Pokud se pohnul
-            if ((transform.position - _lastPos).sqrMagnitude > 0.001f)
-            {
-                Quaternion targetRot = Quaternion.LookRotation(movementDir);
-                transform.rotation = Quaternion.Slerp(transform.rotation, targetRot, Time.deltaTime * 10f);
-            }
-
-            _lastPos = transform.position;
+            BehaviorLogic();
         }
-        _lastPos = transform.position;
     }
 
     public virtual void InitializeEnemy(
@@ -196,6 +196,7 @@ public abstract class EnemyBaseAI : NetworkBehaviour
         _currentAttackRate = attackRate;
         _knockbackResistance = knockbackResistance;
         _xpReward = xp;
+        _health.IsInvulnerable = false;
 
         // Aplikace rychlosti na Agenta
         if (_agent != null)
@@ -260,98 +261,20 @@ public abstract class EnemyBaseAI : NetworkBehaviour
         }
     }
 
-    public void SetTier(EnemyTier tier)
-    {
-        _tier = tier;
-        // Pokud se změní staty (HP/DMG), aplikujte je zde
-
-        // DŮLEŽITÉ: Předat Tier do Health komponenty
-        if (_health != null)
-        {
-            _health.SetEnemyTier(tier);
-        }
-    }
-
-    protected abstract void BehaviorLogic();
-
-    // --- POHYB ---
-
-    protected virtual void MoveToTarget()
-    {
-        if (!IsServer || _targetPlayer == null || !_agent.enabled || !_agent.isOnNavMesh) return;
-        // 1. Zrušení "přemýšlení" - agent nebude brzdit před cílem, prostě jím "projede" (nebo narazí do collideru)
-        if (_agent.autoBraking) _agent.autoBraking = false;
-
-        // 2. Plynulejší rotace - když se hýbe, nechť rotuje NavMeshAgent (je to plynulejší než Lerp v Update)
-        _agent.updateRotation = true;
-
-        // 3. Odstranění "zasekávání" - nevolat SetDestination každý frame!
-        if (Time.time >= _pathUpdateTimer)
-        {
-            UpdatePathingRate();
-            _pathUpdateTimer = Time.time + _currentPathUpdateInterval;
-            _agent.SetDestination(_targetPlayer.position);
-        }
-
-        if (_agent.isStopped) _agent.isStopped = false;
-    }
-
-    protected virtual void StopMovement()
-    {
-        if (!IsServer || !_agent.enabled) return;
-
-        _agent.isStopped = true;
-
-        // Když stojí, chceme ho otáčet manuálně v Update (RotateToTarget), aby mířil na hráče při útoku
-        _agent.updateRotation = false;
-
-        // Reset velocity, aby "doklouzal" jen minimálně
-        _agent.velocity = Vector3.zero;
-    }
+    public virtual void BehaviorLogic() { }
 
     protected void RotateToTarget()
     {
-        // Pokud se hýbe pomocí Agenta, nezasahujeme do rotace manuálně (cukalo by to)
-        if (_agent.enabled && !_agent.isStopped && _agent.updateRotation) return;
-
-        if (_targetPlayer == null) return;
-
-        Vector3 direction = (_targetPlayer.position - transform.position).normalized;
-        direction.y = 0;
-
-        if (direction != Vector3.zero)
+        if (TargetPlayer == null) return;
+        
+        Vector3 dir = (TargetPlayer.position - MyTransform.position).normalized;
+        dir.y = 0; // Nechceme se naklánět nahoru/dolů
+        
+        if (dir != Vector3.zero)
         {
-            Quaternion lookRotation = Quaternion.LookRotation(direction);
-            transform.rotation = Quaternion.RotateTowards(transform.rotation, lookRotation, _rotationSpeed * Time.deltaTime);
+            Quaternion rot = Quaternion.LookRotation(dir);
+            MyTransform.rotation = Quaternion.RotateTowards(MyTransform.rotation, rot, _rotationSpeed * Time.deltaTime);
         }
-    }
-
-    protected void FindClosestPlayer()
-    {
-        float closestDistSq = float.MaxValue; // Používáme čtverec vzdálenosti
-        Transform bestTarget = null;
-
-        // Předpočítáme si AggroRange na druhou (např. 100*100 = 10000)
-        // Ideálně to mějte v proměnné _aggroRangeSqr vypočítané v Awake
-        float aggroRangeSqr = _aggroRange * _aggroRange;
-
-        Vector3 myPos = transform.position; // Cachování transformu (drobná pomoc)
-
-        foreach (var client in NetworkManager.Singleton.ConnectedClientsList)
-        {
-            if (client.PlayerObject != null)
-            {
-                // Rychlý výpočet bez odmocniny
-                float dSq = (myPos - client.PlayerObject.transform.position).sqrMagnitude;
-
-                if (dSq < closestDistSq && dSq <= aggroRangeSqr)
-                {
-                    closestDistSq = dSq;
-                    bestTarget = client.PlayerObject.transform;
-                }
-            }
-        }
-        _targetPlayer = bestTarget;
     }
 
     // --- SMRT A POŠKOZENÍ ---
@@ -394,10 +317,6 @@ public abstract class EnemyBaseAI : NetworkBehaviour
     protected virtual void HandleDeath()
     {
         if (_agent.enabled) _agent.enabled = false;
-
-        // ZMĚNA: Kontrola null
-        if (_animator != null) _animator.SetTrigger("Die");
-
         StartCoroutine(DespawnRoutine());
     }
 
@@ -433,26 +352,6 @@ public abstract class EnemyBaseAI : NetworkBehaviour
         _health.DestroySelf();
     }
 
-    protected void UpdatePathingRate()
-    {
-        if (_targetPlayer == null) return;
-
-        // Vypočítáme čtverec vzdálenosti (rychlejší než Vector3.Distance)
-        float distSq = (_targetPlayer.position - transform.position).sqrMagnitude;
-
-        // 400 = 20 metrů (20 * 20). 
-        // Pokud je hráč dál než 20 metrů, hledáme cestu jen 1x za sekundu.
-        if (distSq > 400f)
-        {
-            _currentPathUpdateInterval = 1.0f;
-        }
-        else
-        {
-            // Pokud je blízko, reagujeme rychle (0.2s)
-            _currentPathUpdateInterval = 0.2f;
-        }
-    }
-
     public void WarpAgentToPosition(Vector3 pos)
     {
         if (_agent != null)
@@ -469,6 +368,31 @@ public abstract class EnemyBaseAI : NetworkBehaviour
             {
                 _agent.Warp(pos);
             }
+        }
+    }
+
+    /// <summary>
+    /// Aplikuje pohyb vypočítaný Managerem.
+    /// </summary>
+    /// <param name="velocity">Vektor pohybu (směr * rychlost)</param>
+    public void ManualMove(Vector3 velocity)
+    {
+        if (_isSpawning.Value) return;
+
+        float speed = velocity.magnitude;
+
+        // 1. Posun NavMeshAgenta (virtuální pozice na mapě)
+        // Agent zajistí, že nevyběhneme z NavMeshe (validace pozice)
+        _agent.nextPosition = MyTransform.position + velocity * Time.deltaTime;
+
+        // 2. Synchronizace vizuálního Transformu s Agentem
+        MyTransform.position = _agent.nextPosition;
+
+        // 3. Rotace směrem k pohybu
+        if (speed > 0.1f)
+        {
+            Quaternion targetRot = Quaternion.LookRotation(velocity.normalized);
+            MyTransform.rotation = Quaternion.RotateTowards(MyTransform.rotation, targetRot, _rotationSpeed * Time.deltaTime);
         }
     }
 
