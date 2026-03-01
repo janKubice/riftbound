@@ -14,6 +14,7 @@ public abstract class AttackLogic : ScriptableObject
         NetworkObject attacker, 
         WeaponManager weaponManager, 
         Transform firePoint,
-        WeaponStats stats
+        WeaponStats stats,
+        int projectileCountBonus = 0 
     );
 }

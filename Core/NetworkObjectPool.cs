@@ -1,7 +1,6 @@
 using System.Collections.Generic;
 using Unity.Netcode;
 using UnityEngine;
-using UnityEngine.Assertions;
 
 public class NetworkObjectPool : NetworkBehaviour
 {
@@ -18,16 +17,13 @@ public class NetworkObjectPool : NetworkBehaviour
         if (Instance != null && Instance != this)
         {
             Destroy(gameObject);
+            return;
         }
-        else
-        {
-            Instance = this;
-        }
+        Instance = this;
     }
 
     public override void OnNetworkSpawn()
     {
-        // Registrace všech prefabů do pooling systému Netcode
         foreach (var config in PooledPrefabsList)
         {
             RegisterPrefab(config.Prefab, config.PrewarmCount);
@@ -36,7 +32,6 @@ public class NetworkObjectPool : NetworkBehaviour
 
     public override void OnNetworkDespawn()
     {
-        // Úklid při vypnutí
         foreach (var prefab in _prefabs)
         {
             NetworkManager.Singleton.PrefabHandler.RemoveHandler(prefab);
@@ -47,45 +42,47 @@ public class NetworkObjectPool : NetworkBehaviour
     private void RegisterPrefab(GameObject prefab, int prewarmCount)
     {
         _prefabs.Add(prefab);
-        _pooledObjects[prefab] = new Queue<NetworkObject>();
+        _pooledObjects[prefab] = new Queue<NetworkObject>(prewarmCount);
 
-        // Vytvoření počáteční zásoby (Prewarm)
         for (int i = 0; i < prewarmCount; i++)
         {
             var go = Instantiate(prefab);
             var no = go.GetComponent<NetworkObject>();
-            _pooledObjects[prefab].Enqueue(no);
             go.SetActive(false);
+            _pooledObjects[prefab].Enqueue(no);
         }
 
-        // Řekneme Netcode, ať pro tento prefab používá náš pool
         NetworkManager.Singleton.PrefabHandler.AddHandler(prefab, new PooledPrefabInstanceHandler(prefab, this));
     }
 
     public NetworkObject GetNetworkObject(GameObject prefab, Vector3 position, Quaternion rotation)
     {
-        if (!_pooledObjects.ContainsKey(prefab))
+        if (!_pooledObjects.TryGetValue(prefab, out Queue<NetworkObject> queue))
         {
-            Debug.LogError($"Prefab {prefab.name} není registrován v Poolu! Přidej ho do listu v Inspektoru.");
+            Debug.LogError($"Prefab {prefab.name} není registrován v Poolu.");
             return null;
         }
 
-        Queue<NetworkObject> queue = _pooledObjects[prefab];
-        NetworkObject networkObject;
+        NetworkObject networkObject = null;
 
-        // Pokud je fronta prázdná, vyrobíme nový (jinak bereme ze zásoby)
-        if (queue.Count > 0)
+        // VYČIŠTĚNÍ POOLU: Projdeme frontu. Pokud je nějaký objekt zničený (null), zahodíme ho.
+        while (queue.Count > 0)
         {
-            networkObject = queue.Dequeue();
+            NetworkObject obj = queue.Dequeue();
+            if (obj != null && obj.gameObject != null)
+            {
+                networkObject = obj;
+                break; // Našli jsme zdravý, existující objekt
+            }
         }
-        else
+
+        // Pokud byla fronta prázdná nebo plná smazaných objektů, instancujeme nový
+        if (networkObject == null)
         {
             networkObject = Instantiate(prefab).GetComponent<NetworkObject>();
         }
 
-        // Aktivace a nastavení pozice
-        networkObject.transform.position = position;
-        networkObject.transform.rotation = rotation;
+        networkObject.transform.SetPositionAndRotation(position, rotation);
         networkObject.gameObject.SetActive(true);
 
         return networkObject;
@@ -97,20 +94,18 @@ public class NetworkObjectPool : NetworkBehaviour
         _pooledObjects[prefab].Enqueue(networkObject);
     }
 
-    // Helper třída pro Inspector
     [System.Serializable]
-    struct PoolConfigObject
+    private struct PoolConfigObject
     {
         public GameObject Prefab;
         public int PrewarmCount;
     }
 }
 
-// Handler, který propojuje Unity Netcode s naším poolem
 public class PooledPrefabInstanceHandler : INetworkPrefabInstanceHandler
 {
-    private GameObject _prefab;
-    private NetworkObjectPool _pool;
+    private readonly GameObject _prefab;
+    private readonly NetworkObjectPool _pool;
 
     public PooledPrefabInstanceHandler(GameObject prefab, NetworkObjectPool pool)
     {

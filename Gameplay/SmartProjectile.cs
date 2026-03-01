@@ -21,7 +21,7 @@ public class SmartProjectile : NetworkBehaviour
     private float _spawnTime;
     private const float COLLISION_GRACE_PERIOD = 0.05f; // 50ms ignorování kolizí po spawnu
 
-    public void Initialize(NetworkObject attacker, Vector3 direction, WeaponStats stats, List<HitEffect> payload = null)
+    public virtual void Initialize(NetworkObject attacker, Vector3 direction, WeaponStats stats, List<HitEffect> payload = null)
     {
         _attackerObjectId = attacker.NetworkObjectId;
         _stats = stats;
@@ -121,7 +121,7 @@ public class SmartProjectile : NetworkBehaviour
             enemy.TakeDamage(_stats.Damage, _attackerObjectId);
 
             // B) Spuštění PROC efektů (Chain Lightning, atd.)
-            ExecutePayload(other.gameObject, other.ClosestPoint(transform.position));
+            ExecutePayload(other.gameObject, GetSafeHitPosition(other));
 
             hitSomethingValid = true;
             destroyProjectile = true;
@@ -133,7 +133,7 @@ public class SmartProjectile : NetworkBehaviour
             player.TakeDamageServerRpc(_stats.Damage);
 
             // B) Spuštění efektů i na hráče
-            ExecutePayload(other.gameObject, other.ClosestPoint(transform.position));
+            ExecutePayload(other.gameObject, GetSafeHitPosition(other));
 
             hitSomethingValid = true;
             destroyProjectile = true;
@@ -142,8 +142,8 @@ public class SmartProjectile : NetworkBehaviour
         // 5. Zeď / Podlaha
         else if (!other.isTrigger)
         {
-            // I do zdi můžeme pustit efekt (např. exploze, která zraní okolí)
-            ExecutePayload(other.gameObject, other.ClosestPoint(transform.position));
+            // Použijeme naši bezpečnou metodu
+            ExecutePayload(other.gameObject, GetSafeHitPosition(other));
 
             destroyProjectile = true;
             hitSomethingValid = true;
@@ -154,7 +154,7 @@ public class SmartProjectile : NetworkBehaviour
         {
             _hitHistory.Add(other.gameObject);
 
-            Vector3 hitPos = other.ClosestPoint(transform.position);
+            Vector3 hitPos = GetSafeHitPosition(other);
             SpawnImpact(hitPos, -transform.forward);
 
             if (destroyProjectile)
@@ -171,7 +171,6 @@ public class SmartProjectile : NetworkBehaviour
         }
     }
 
-    // --- NOVÁ METODA PRO SPUŠTĚNÍ EFEKTŮ ---
     protected void ExecutePayload(GameObject target, Vector3 hitPosition)
     {
         // Pokud nemáme žádné efekty, končíme
@@ -193,6 +192,19 @@ public class SmartProjectile : NetworkBehaviour
                 }
             }
         }
+    }
+
+    private Vector3 GetSafeHitPosition(Collider other)
+    {
+        // Pokud trefíme podlahu nebo složitou zeď (non-convex MeshCollider), 
+        // ClosestPoint by vyhodil chybu. Místo toho rovnou vrátíme pozici projektilu.
+        if (other is MeshCollider meshCollider && !meshCollider.convex)
+        {
+            return transform.position;
+        }
+
+        // Pro běžné objekty (nepřátelé, bedny) použijeme přesný výpočet
+        return other.ClosestPoint(transform.position);
     }
 
     private void SpawnImpact(Vector3 pos, Vector3 normal)

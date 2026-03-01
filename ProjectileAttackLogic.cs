@@ -4,9 +4,9 @@ using Unity.Netcode;
 [CreateAssetMenu(fileName = "ProjectileAttack", menuName = "Attacks/Projectile Logic")]
 public class ProjectileAttackLogic : AttackLogic
 {
-    public override void ExecuteAttack(NetworkObject attacker, WeaponManager weaponManager, Transform firePoint, WeaponStats stats)
+    public override void ExecuteAttack(NetworkObject attacker, WeaponManager weaponManager, Transform firePoint, WeaponStats stats, int projectileCountBonus = 0)
     {
-        Debug.Log($"[DEBUG ÚTOK] 1. Útok spuštěn! (Server: {NetworkManager.Singleton.IsServer})");
+        //Debug.Log($"[DEBUG ÚTOK] 1. Útok spuštěn! (Server: {NetworkManager.Singleton.IsServer})");
         // 1. Validace
         if (weaponManager.CurrentWeaponData == null || weaponManager.CurrentWeaponData.ProjectilePrefab == null)
         {
@@ -36,7 +36,7 @@ public class ProjectileAttackLogic : AttackLogic
         }
 
         // 2. Počet projektilů (Spread logic)
-        int count = Mathf.Max(1, stats.ProjectileCount);
+        int count =  stats.ProjectileCount + projectileCountBonus;
         float startAngle = -stats.Spread / 2f;
         float angleStep = count > 1 ? stats.Spread / (count - 1) : 0f;
 

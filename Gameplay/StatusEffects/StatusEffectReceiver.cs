@@ -5,7 +5,6 @@ using UnityEngine;
 
 public class StatusEffectReceiver : NetworkBehaviour
 {
-
     // Seznam aktivních efektů (Spravuje Server)
     private List<ActiveEffect> _activeEffects = new List<ActiveEffect>();
 
@@ -14,8 +13,7 @@ public class StatusEffectReceiver : NetworkBehaviour
 
     // Reference na komponenty (pokusí se najít HP a Movement)
     private PlayerAttributes _playerAttributes;
-    // private EnemyHealth _enemyHealth; // Tady doplníme referenci, až budeme dělat Enemies
-    // private CharacterController _characterController; // Pro speed modifikaci
+    private EnemyHealth _enemyHealth; // OPRAVENO: Odkomentováno pro nepřátele
 
     public float CurrentSpeedMultiplier { get; private set; } = 1.0f;
     public bool IsStunned { get; private set; } = false;
@@ -23,7 +21,7 @@ public class StatusEffectReceiver : NetworkBehaviour
     private void Awake()
     {
         _playerAttributes = GetComponent<PlayerAttributes>();
-        // _enemyHealth = GetComponent<EnemyHealth>();
+        _enemyHealth = GetComponent<EnemyHealth>(); // OPRAVENO: Získání reference
     }
 
     public override void OnNetworkDespawn()
@@ -66,7 +64,7 @@ public class StatusEffectReceiver : NetworkBehaviour
                 }
             }
 
-            // 2. Kalkulace Speed Multiplieru (všechny efekty se násobí)
+            // 2. Kalkulace Speed Multiplieru
             if (effect.Data.SpeedMultiplier != 1.0f)
             {
                 newSpeedMult *= effect.Data.SpeedMultiplier;
@@ -82,7 +80,6 @@ public class StatusEffectReceiver : NetworkBehaviour
             }
 
             // KONTROLA STUNU
-            // Pokud tento konkrétní efekt má zaškrtnuto "IsStun", tak jsme omráčení.
             if (effect.Data.IsStun)
             {
                 isStunnedThisFrame = true;
@@ -91,15 +88,11 @@ public class StatusEffectReceiver : NetworkBehaviour
             IsStunned = isStunnedThisFrame;
         }
 
-        // Aktualizace cache statů
         if (Mathf.Abs(CurrentSpeedMultiplier - newSpeedMult) > 0.01f)
         {
             CurrentSpeedMultiplier = newSpeedMult;
-            // Tady bychom mohli poslat NetworkVariable, pokud potřebujeme přesnou synchronizaci rychlosti pro animace
         }
     }
-
-    // --- Public API (Volá se ze zbraní, pastí, atd.) ---
 
     public void ApplyStatusEffect(StatusEffectData data)
     {
@@ -122,8 +115,6 @@ public class StatusEffectReceiver : NetworkBehaviour
             ActiveEffect newEffect = new ActiveEffect(data);
             _activeEffects.Add(newEffect);
 
-            // Informujeme klienty, ať si zapnou VFX
-            // (Posíláme ID nebo Name - Name je jednodušší pro prototyp, ID je lepší pro bandwidth)
             AddEffectClientRpc(data.EffectName);
         }
     }
@@ -132,45 +123,33 @@ public class StatusEffectReceiver : NetworkBehaviour
     {
         float damage = effect.Data.DamagePerTick;
 
-        // Pokud se poškození násobí stacky (volitelné, pro teď jednoduché)
-        // damage *= effect.Stacks; 
-
         if (damage > 0)
         {
-            // Aplikace do PlayerAttributes
+            // Aplikace na Hráče
             if (_playerAttributes != null)
             {
                 _playerAttributes.TakeDamageServerRpc((int)damage);
             }
-            // Zde později doplníme EnemyHealth.TakeDamage(damage)
+            else if (_enemyHealth != null)
+            {
+                _enemyHealth.TakeDamage((int)damage);
+            }
         }
     }
-
-    // --- Visuals Sync (Client RPCs) ---
 
     [ClientRpc]
     private void AddEffectClientRpc(string effectName)
     {
-        // Najdeme data efektu (V reálu by to měl být Resource lookup nebo ID list)
-        // Pro prototyp to načteme z Resources, nebo musíme mít referenci.
-        // ABY TO BYLO ROBUSTNÍ: Uděláme si jednoduchý Singleton "GameEffectManager", který drží seznam všech Data objektů.
-        // Pro teď zkusíme najít efekt v projektu (neefektivní) nebo předpokládejme, že ho máme.
-
-        // *OPTIMALIZACE*: Místo stringu posílat int ID. 
-        // Pro zjednodušení v tomto kódu předpokládám, že máme statickou metodu na nalezení dat:
         StatusEffectData data = GameEffectDatabase.GetEffectByName(effectName);
 
         if (data == null || data.EffectVFXPrefab == null) return;
-        if (_clientVFXInstances.ContainsKey(effectName)) return; // Už běží
+        if (_clientVFXInstances.ContainsKey(effectName)) return; 
 
-        // Instantiace VFX
         GameObject vfx = Instantiate(data.EffectVFXPrefab, transform.position, Quaternion.identity);
 
-        // Přichycení (Parenting)
         Transform targetBone = transform;
         if (!string.IsNullOrEmpty(data.AttachBoneName))
         {
-            // Zkusíme najít kost rekurzivně
             Transform bone = FindDeepChild(transform, data.AttachBoneName);
             if (bone != null) targetBone = bone;
         }
@@ -189,12 +168,11 @@ public class StatusEffectReceiver : NetworkBehaviour
         {
             if (vfx != null)
             {
-                // Pokud má particle system stop action, necháme ho dojet, jinak destroy
                 ParticleSystem ps = vfx.GetComponent<ParticleSystem>();
                 if (ps != null)
                 {
                     ps.Stop();
-                    Destroy(vfx, 2.0f); // Necháme dojet trail
+                    Destroy(vfx, 2.0f);
                 }
                 else
                 {
@@ -205,7 +183,6 @@ public class StatusEffectReceiver : NetworkBehaviour
         }
     }
 
-    // Pomocná funkce pro hledání kosti
     private Transform FindDeepChild(Transform parent, string name)
     {
         foreach (Transform child in parent)

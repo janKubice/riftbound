@@ -6,5 +6,6 @@ public enum StatusEffectType
     Stun,   // Zastavení
     Freeze, // Zastavení + křehkost
     Weakness, // Snížení damage nepřítele
-    Buff
+    Buff,
+    Poison, // DoT + snížení efektivity léčení
 }

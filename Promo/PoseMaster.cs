@@ -6,40 +6,44 @@ public class PoseMaster : MonoBehaviour
     public Animator animator;
     public string stateName = "Attack_Overhead";
     [Range(0f, 1f)] public float playbackTime = 0.5f;
-    
-    // Přepínač chování
-    public bool loop = false; 
+    public bool loop = false;
 
-    void LateUpdate()
+    private float _lastPlaybackTime;
+    private string _lastStateName;
+    private bool _wasLooping;
+
+    void Update()
     {
-        if (animator == null) return;
+        if (animator == null || string.IsNullOrEmpty(stateName)) return;
 
         if (loop)
         {
-            // REŽIM SMYČKY
             animator.speed = 1f;
 
-            // V Editor Mode (ne Play Mode) se animátor sám neaktualizuje, musíme ho posunout manuálně
+            if (!animator.GetCurrentAnimatorStateInfo(0).IsName(stateName))
+            {
+                animator.Play(stateName, 0, 0f);
+            }
+
             if (!Application.isPlaying)
             {
                 animator.Update(Time.deltaTime);
             }
-            // V Play Mode (Ingame) se o to Unity postará samo, když je speed > 0
         }
         else
         {
-            // REŽIM ZMRAZENÍ (Původní logika)
             animator.speed = 0f;
 
-            if (Application.isPlaying)
+            if (playbackTime != _lastPlaybackTime || stateName != _lastStateName || loop != _wasLooping)
             {
                 animator.Play(stateName, 0, playbackTime);
-            }
-            else
-            {
-                animator.Play(stateName, 0, playbackTime);
-                animator.Update(0);
+                animator.Update(0f);
+                
+                _lastPlaybackTime = playbackTime;
+                _lastStateName = stateName;
             }
         }
+        
+        _wasLooping = loop;
     }
 }

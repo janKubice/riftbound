@@ -1,6 +1,7 @@
 using UnityEngine;
 using Unity.Netcode;
 using System;
+using System.Collections.Generic;
 
 public class EnemyHealth : NetworkBehaviour
 {
@@ -29,6 +30,15 @@ public class EnemyHealth : NetworkBehaviour
     private NetworkedAudioSource _netAudio;
     private ulong _lastAttackerId = 9999;
 
+    [Header("Gore System")]
+    [Tooltip("Seznam prefabů kousků těla (hlava, ruka, kosti). Každý prefab musí mít Rigidbody a Collider.")]
+    [SerializeField] private List<GameObject> _gorePrefabs = new List<GameObject>();
+    private bool _isExplosiveKill = false;
+    private Vector3 _explosionCenter;
+    private float _explosionForce;
+    private float _explosionRadius;
+    private bool _isDead = false;
+
     private void Awake()
     {
         _rb = GetComponent<Rigidbody>();
@@ -43,6 +53,23 @@ public class EnemyHealth : NetworkBehaviour
         {
             CurrentHealth.Value = _isTrainingDummy ? 999999 : _maxHealth;
         }
+
+        // 1. Znovu zapnout všechny collidery
+        Collider[] allColliders = GetComponentsInChildren<Collider>();
+        foreach (var col in allColliders)
+        {
+            col.enabled = true;
+        }
+
+        // 2. Obnovit fyziku (při smrti jsme zapínali isKinematic = true)
+        if (_rb != null)
+        {
+            _rb.isKinematic = false;
+        }
+
+        // 3. Reset nesmrtelnosti (pro jistotu)
+        IsInvulnerable = false;
+        _isDead = false;
     }
 
     public void SetEnemyTier(EnemyTier tier)
@@ -51,7 +78,7 @@ public class EnemyHealth : NetworkBehaviour
     }
 
     // --- HLAVNÍ ZMĚNA ZDE ---
-    
+
     /// <summary>
     /// Veřejná metoda, kterou může zavolat kdokoliv (Klient i Server).
     /// </summary>
@@ -85,7 +112,7 @@ public class EnemyHealth : NetworkBehaviour
     private void ApplyDamageLogic(int amount, ulong attackerId)
     {
         // Zde už nemusíme kontrolovat !IsServer, protože sem se dostaneme jen na Serveru
-        
+        if (!IsSpawned || _isDead) return;
         if (IsInvulnerable)
         {
             // Můžeme nechat log pro debug, ale bez 'IsServer' varování
@@ -98,18 +125,13 @@ public class EnemyHealth : NetworkBehaviour
         CurrentHealth.Value -= amount;
         _lastAttackerId = attackerId;
 
-        if (attackerId != 9999 && SteamStatsManager.Instance != null)
+        if (attackerId != 9999 && SteamStatsManager.Instance != null && SteamStatsManager.Instance.IsSpawned) // PŘIDÁNO IsSpawned
         {
-            // Připravíme parametry, aby se zpráva poslala JEN tomu, kdo útočil
             ClientRpcParams clientParams = new ClientRpcParams
             {
-                Send = new ClientRpcSendParams
-                {
-                    TargetClientIds = new ulong[] { attackerId }
-                }
+                Send = new ClientRpcSendParams { TargetClientIds = new ulong[] { attackerId } }
             };
 
-            // Pošleme RPC konkrétnímu hráči: "Započítej si DMG"
             SteamStatsManager.Instance.IncrementStatClientRpc("stat_total_damage", amount, clientParams);
         }
 
@@ -120,9 +142,9 @@ public class EnemyHealth : NetworkBehaviour
         }
 
         // Zvuk
-        if (_netAudio != null) 
+        if (_netAudio != null)
             _netAudio.PlayOneShotNetworked(_hurtSoundIndex);
-            
+
         // Eventy (zavolají se na serveru, pokud potřebuješ reakci u klienta, použij OnValueChanged na NetworkVariable nebo ClientRpc)
         OnDamageTaken?.Invoke(amount);
 
@@ -135,25 +157,114 @@ public class EnemyHealth : NetworkBehaviour
             }
             else
             {
-                Die();
+                _isDead = true;
+
+                if (_isExplosiveKill)
+                {
+                    DieWithExplosion();
+                }
+                else
+                {
+                    Die();
+                }
             }
         }
     }
-    // ------------------------
+
+    public void TakeExplosiveDamage(int amount, Vector3 expCenter, float expForce, float expRadius, ulong attackerId = 9999)
+    {
+        if (IsServer)
+        {
+            _isExplosiveKill = true;
+            _explosionCenter = expCenter;
+            _explosionForce = expForce;
+            _explosionRadius = expRadius;
+
+            ApplyDamageLogic(amount, attackerId);
+
+            _isExplosiveKill = false; // Reset pro jistotu
+        }
+        else
+        {
+            RequestExplosiveDamageServerRpc(amount, expCenter, expForce, expRadius, attackerId);
+        }
+    }
+
+    [ServerRpc(RequireOwnership = false)]
+    private void RequestExplosiveDamageServerRpc(int amount, Vector3 expCenter, float expForce, float expRadius, ulong attackerId)
+    {
+        TakeExplosiveDamage(amount, expCenter, expForce, expRadius, attackerId);
+    }
 
     public void InitializeHealth(int maxHp)
     {
         if (!IsServer) return;
         _maxHealth = maxHp;
         CurrentHealth.Value = maxHp;
+
+        // 1. Znovu zapnout všechny collidery
+        Collider[] allColliders = GetComponentsInChildren<Collider>();
+        foreach (var col in allColliders)
+        {
+            col.enabled = true;
+        }
+
+        // 2. Obnovit fyziku (při smrti jsme zapínali isKinematic = true)
+        if (_rb != null)
+        {
+            _rb.isKinematic = false;
+        }
+
+        // 3. Reset nesmrtelnosti (pro jistotu)
+        IsInvulnerable = false;
     }
 
     private void Die()
     {
+        PerformSharedDeathLogic();
+
+        // Spawn běžného rozpadu (není exploze)
+        SpawnGorePrefabsClientRpc(transform.position, false, Vector3.zero, 0f, 0f);
+
+        DestroySelf();
+    }
+
+    private void DieWithExplosion()
+    {
+        if (_rb != null) _rb.isKinematic = true;
+        Collider[] allColliders = GetComponentsInChildren<Collider>();
+        foreach (var col in allColliders) col.enabled = false;
+
+        // Spawn rozmetání meteoritem
+        SpawnGorePrefabsClientRpc(transform.position, true, _explosionCenter, _explosionForce, _explosionRadius);
+
+        if (IsServer && gameObject.activeInHierarchy)
+        {
+            StartCoroutine(DelayedDespawnRoutine());
+        }
+    }
+
+    private System.Collections.IEnumerator DelayedDespawnRoutine()
+    {
+        // Počkáme 0.1s, aby síť zaručeně stihla odeslat RPC
+        yield return new WaitForSeconds(0.1f);
+
+        // AŽ TEĎ zavoláme zbytek logiky smrti (loot, OnDeath eventy) a zničíme
+        PerformSharedDeathLogic();
+        DestroySelf();
+    }
+
+    private void PerformSharedDeathLogic()
+    {
         OnDeath?.Invoke();
 
-        if (_netAudio != null) 
+        if (_netAudio != null)
             _netAudio.PlayOneShotNetworked(_deathSoundIndex);
+
+        if (IsServer && DirectorSpawner.Instance != null)
+        {
+            DirectorSpawner.Instance.EnemyDied();
+        }
 
         if (IsServer && _lootTable != null && LootManager.Instance != null)
         {
@@ -183,24 +294,12 @@ public class EnemyHealth : NetworkBehaviour
         }
 
         if (_rb != null) _rb.isKinematic = true;
-        var col = GetComponent<Collider>();
-        if (col != null) col.enabled = false;
-
-        if (_lastAttackerId != 9999 && SteamStatsManager.Instance != null)
+        Collider[] allColliders = GetComponentsInChildren<Collider>();
+        foreach (var col in allColliders)
         {
-            // Připravíme parametry, aby se zpráva poslala JEN tomu, kdo útočil
-            ClientRpcParams clientParams = new ClientRpcParams
-            {
-                Send = new ClientRpcSendParams
-                {
-                    TargetClientIds = new ulong[] { _lastAttackerId }
-                }
-            };
-
-            // Pošleme RPC konkrétnímu hráči: "Započítej si DMG"
-            SteamStatsManager.Instance.IncrementStatClientRpc("stat_total_damage", 1, clientParams);
+            col.enabled = false;
         }
-        
+
         DestroySelf(); // Volání úklidu
     }
 
@@ -221,13 +320,58 @@ public class EnemyHealth : NetworkBehaviour
         if (!IsServer) return;
 
         var netObj = GetComponent<NetworkObject>();
+
+        // Pouze ho bezpečně odspawnujeme (to ho automaticky vrátí do tvého Poolu).
+        // NIKDY nevoláme Destroy(gameObject), pokud používáme pooling!
         if (netObj != null && netObj.IsSpawned)
         {
-            netObj.Despawn(true); // Vypnutí a návrat do poolu
+            netObj.Despawn(true);
         }
-        else
+    }
+
+    [ClientRpc]
+    private void SpawnGorePrefabsClientRpc(Vector3 pos, bool isExplosion, Vector3 expCenter, float expForce, float expRadius)
+    {
+        // Pokud nemáme nastavené žádné části, ignorujeme
+        if (_gorePrefabs == null || _gorePrefabs.Count == 0) return;
+
+        // Náhodně určíme, kolik kusů (1 až VŠECHNY) z nepřítele vypadne
+        int countToSpawn = UnityEngine.Random.Range(1, _gorePrefabs.Count + 1);
+
+        for (int i = 0; i < countToSpawn; i++)
         {
-            Destroy(gameObject);
+            // Vybereme náhodný prefab z listu pro každý kus
+            GameObject prefab = _gorePrefabs[UnityEngine.Random.Range(0, _gorePrefabs.Count)];
+
+            // Mírný rozptyl pozice (aby se nespawnuly přesně v sobě a neexplodovaly o sebe chybou fyziky)
+            Vector3 spawnOffset = new Vector3(
+                UnityEngine.Random.Range(-0.5f, 0.5f),
+                UnityEngine.Random.Range(0.5f, 1.5f),
+                UnityEngine.Random.Range(-0.5f, 0.5f)
+            );
+
+            GameObject goreObj = Instantiate(prefab, pos + spawnOffset, UnityEngine.Random.rotation);
+
+            // Aplikace fyziky
+            if (goreObj.TryGetComponent(out Rigidbody rb))
+            {
+                if (isExplosion)
+                {
+                    // Rozmetání do okolí (přidán upthrust 3.0f pro obloukový let)
+                    rb.AddExplosionForce(expForce, expCenter, expRadius, 3.0f, ForceMode.Impulse);
+                    rb.AddTorque(UnityEngine.Random.insideUnitSphere * 50f, ForceMode.Impulse);
+                }
+                else
+                {
+                    // Běžná smrt - kousky jen lehce vyskočí a spadnou
+                    Vector3 popDirection = new Vector3(UnityEngine.Random.Range(-1f, 1f), 2f, UnityEngine.Random.Range(-1f, 1f));
+                    rb.AddForce(popDirection * 3f, ForceMode.Impulse);
+                    rb.AddTorque(UnityEngine.Random.insideUnitSphere * 10f, ForceMode.Impulse);
+                }
+            }
+
+            // Náhodné zničení po 10 až 30 sekundách (úklid paměti)
+            Destroy(goreObj, UnityEngine.Random.Range(10f, 30f));
         }
     }
 }

@@ -49,7 +49,7 @@ public class WeaponVisualsController : MonoBehaviour
     {
         if (_isLaserWeapon) return;
         if (_currentVfxPrefab == null || _currentSpawnPoint == null) return;
-
+        _vfxPool.RemoveAll(item => item.Root == null);
         // 3. Pokus najít volný efekt v poolu
         PooledVFX vfxToUse = null;
 

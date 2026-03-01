@@ -41,5 +41,7 @@ public enum StatType
     PickupRange,
     CharacterSize,
     Luck,               // Lepší loot / Crit roll
-    ExperienceGain      // % XP bonus
+    ExperienceGain,      // % XP bonus
+
+    SlamDamage
 }

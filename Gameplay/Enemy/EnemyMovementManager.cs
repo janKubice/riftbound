@@ -1,6 +1,9 @@
 using UnityEngine;
 using System.Collections.Generic;
 using Unity.Netcode;
+using Unity.Collections;
+using Unity.Jobs;
+using Unity.Mathematics;
 
 public class EnemyMovementManager : MonoBehaviour
 {
@@ -9,22 +12,30 @@ public class EnemyMovementManager : MonoBehaviour
     [Header("Settings")]
     [SerializeField] private float _separationRadius = 1.5f;
     [SerializeField] private float _separationForce = 2.0f;
-    [Tooltip("Každý kolikátý snímek se počítá separace pro danou entitu")]
-    [SerializeField] private int _separationUpdateRate = 10; 
+    [SerializeField] private float _cellSize = 2.0f;
 
     private List<EnemyBaseAI> _activeEnemies = new List<EnemyBaseAI>(3000);
-    private static readonly Collider[] _neighborBuffer = new Collider[10];
-    private int _frameCount = 0;
+    
+    private NativeArray<float3> _positions;
+    private NativeArray<float3> _separationVectors;
+    private NativeParallelMultiHashMap<int, int> _hashMap;
 
     private void Awake()
     {
         if (Instance != null) Destroy(gameObject);
         Instance = this;
+        AllocateNativeArrays(3000);
+    }
+
+    private void OnDestroy()
+    {
+        DisposeNativeArrays();
     }
 
     public void RegisterEnemy(EnemyBaseAI enemy)
     {
         if (!_activeEnemies.Contains(enemy)) _activeEnemies.Add(enemy);
+        EnsureCapacity(_activeEnemies.Count);
     }
 
     public void UnregisterEnemy(EnemyBaseAI enemy)
@@ -32,86 +43,90 @@ public class EnemyMovementManager : MonoBehaviour
         _activeEnemies.Remove(enemy);
     }
 
+    private void EnsureCapacity(int count)
+    {
+        if (count > _positions.Length)
+        {
+            DisposeNativeArrays();
+            AllocateNativeArrays(count * 2);
+        }
+    }
+
+    private void AllocateNativeArrays(int capacity)
+    {
+        _positions = new NativeArray<float3>(capacity, Allocator.Persistent);
+        _separationVectors = new NativeArray<float3>(capacity, Allocator.Persistent);
+        _hashMap = new NativeParallelMultiHashMap<int, int>(capacity, Allocator.Persistent);
+    }
+
+    private void DisposeNativeArrays()
+    {
+        if (_positions.IsCreated) _positions.Dispose();
+        if (_separationVectors.IsCreated) _separationVectors.Dispose();
+        if (_hashMap.IsCreated) _hashMap.Dispose();
+    }
+
     private void Update()
     {
         if (!NetworkManager.Singleton.IsServer) return;
 
         int count = _activeEnemies.Count;
-        _frameCount++;
+        if (count == 0) return;
+
+        _hashMap.Clear();
 
         for (int i = 0; i < count; i++)
         {
             var enemy = _activeEnemies[i];
             
-            if (enemy == null) continue;
+            if (enemy.TargetPlayer == null)
+            {
+                FindTargetFor(enemy);
+            }
 
-            // 1. Spuštění logiky nepřítele centrálně
             if (enemy.TargetPlayer != null && !enemy.IsMovementPaused)
             {
                 enemy.BehaviorLogic();
             }
 
-            if (enemy.TargetPlayer == null)
-            {
-                FindTargetFor(enemy);
-                continue;
-            }
+            _positions[i] = enemy.MyTransform.position;
+        }
 
-            if (enemy.IsMovementPaused) continue;
+        var hashJob = new HashPositionsJob
+        {
+            Positions = _positions,
+            HashMap = _hashMap.AsParallelWriter(),
+            CellSize = _cellSize
+        };
+        JobHandle hashHandle = hashJob.Schedule(count, 64);
+
+        var separationJob = new EnemySeparationJob
+        {
+            Positions = _positions,
+            HashMap = _hashMap,
+            SeparationRadius = _separationRadius,
+            SeparationForce = _separationForce,
+            CellSize = _cellSize,
+            SeparationVectors = _separationVectors
+        };
+        JobHandle separationHandle = separationJob.Schedule(count, 64, hashHandle);
+
+        separationHandle.Complete();
+
+        for (int i = 0; i < count; i++)
+        {
+            var enemy = _activeEnemies[i];
+            if (enemy.TargetPlayer == null || enemy.IsMovementPaused) continue;
 
             Vector3 currentPos = enemy.MyTransform.position;
             Vector3 targetPos = enemy.TargetPlayer.position + enemy._targetOffset;
             Vector3 direction = (targetPos - currentPos).normalized;
 
-            // 2. Time-Slicing: Výpočet separace jen pro zlomek entit v aktuálním snímku
-            if (i % _separationUpdateRate == _frameCount % _separationUpdateRate)
-            {
-                enemy.CachedSeparation = GetSeparationVector(enemy);
-            }
-
-            // 3. Aplikace pohybu s využitím cachované separace
-            Vector3 finalVelocity = (direction + enemy.CachedSeparation).normalized * 3.5f; 
+            Vector3 separation = _separationVectors[i];
+            Vector3 finalVelocity = (direction + separation).normalized * 3.5f; 
+            
             enemy.ManualMove(finalVelocity);
         }
-    }
-
-    private Vector3 GetSeparationVector(EnemyBaseAI currentEnemy)
-    {
-        Vector3 separationVector = Vector3.zero;
-        int hitCount = Physics.OverlapSphereNonAlloc(
-            currentEnemy.MyTransform.position,
-            _separationRadius,
-            _neighborBuffer,
-            LayerMask.GetMask("Enemy")
-        );
-
-        int count = 0;
-        for (int i = 0; i < hitCount; i++)
-        {
-            var col = _neighborBuffer[i];
-            if (col.gameObject == currentEnemy.gameObject) continue;
-
-            Vector3 dir = col.transform.position - currentEnemy.MyTransform.position;
-            float dist = dir.magnitude;
-
-            if (dist <= 0.001f)
-            {
-                separationVector += Random.insideUnitSphere;
-                count++;
-                continue;
-            }
-
-            float strength = 1.0f - (dist / _separationRadius);
-            separationVector -= (dir / dist) * strength; 
-            count++;
-        }
-
-        if (count > 0)
-        {
-            separationVector = (separationVector / count) * _separationForce;
-        }
-
-        return separationVector;
     }
 
     private void FindTargetFor(EnemyBaseAI enemy)

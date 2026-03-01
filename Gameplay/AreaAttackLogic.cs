@@ -8,7 +8,7 @@ public class AreaAttackLogic : AttackLogic
     public float ThrowForce = 10f;
     public float ThrowUpwardForce = 2f;
 
-    public override void ExecuteAttack(NetworkObject attacker, WeaponManager weaponManager, Transform firePoint, WeaponStats stats)
+    public override void ExecuteAttack(NetworkObject attacker, WeaponManager weaponManager, Transform firePoint, WeaponStats stats, int projectileCountBonus = 0)
     {
         // Kontrola
         if (weaponManager.CurrentWeaponData.ProjectilePrefab == null)

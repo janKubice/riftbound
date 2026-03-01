@@ -41,6 +41,7 @@ public class WeaponManager : NetworkBehaviour
 
     [SerializeField] private WeaponVisualsController _visuals;
     private PlayerAiming _aiming;
+    private PlayerProgression _progression;
 
     public override void OnNetworkSpawn()
     {
@@ -69,8 +70,8 @@ public class WeaponManager : NetworkBehaviour
             // Pokud začínáme bez zbraně
             _currentWeaponIndex.Value = -1;
         }
-        _aiming = GetComponent<PlayerAiming>();
-
+        _aiming = GetComponent<PlayerAiming>(); 
+        if (_progression == null) _progression = GetComponent<PlayerProgression>();
     }
 
     public override void OnNetworkDespawn()
@@ -228,7 +229,7 @@ public class WeaponManager : NetworkBehaviour
             attackStats.OnHitEffects = GetCombinedEffects();
 
             // 3. Předáme Logic
-            _currentWeaponData.AttackLogic.ExecuteAttack(NetworkObject, this, GetFirePoint(), attackStats);
+            _currentWeaponData.AttackLogic.ExecuteAttack(NetworkObject, this, GetFirePoint(), attackStats, (int)_progression.GetStatBonus(StatType.ProjectileCount));
         }
     }
 

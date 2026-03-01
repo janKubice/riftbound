@@ -128,12 +128,20 @@ public class PlayerController : NetworkBehaviour
     private bool _lastSentGrounded = true;
     // NOVÉ: Proměnná pro zamknutí ovládání (Shop, Cutscény, atd.)
     private bool _inputLocked = false;
+
+
+    [Header("Slam Passive")]
+    [SerializeField] private GameObject _slamVfxPrefab; // Vizuál výbuchu (např. prach/kameny)
+    [SerializeField] private float _minFallDistanceForSlam = 2.0f; // Jak z výšky musí spadnout, aby to bouchlo
+    private float _highestYDuringJump;
+
     private void Awake()
     {
         if (_controller == null) _controller = GetComponent<CharacterController>();
         if (_playerInput == null) _playerInput = GetComponent<PlayerInput>();
         if (_animator == null) _animator = GetComponent<Animator>();
         if (_playerEmotes == null) _playerEmotes = GetComponent<PlayerEmotes>();
+        if (_progression == null) _progression = GetComponent<PlayerProgression>();
 
         _attributes = GetComponent<PlayerAttributes>();
 
@@ -395,6 +403,13 @@ public class PlayerController : NetworkBehaviour
             _playerEmotes.SetEmotingState(false);
         }
 
+        if (!_isGrounded)
+        {
+            if (transform.position.y > _highestYDuringJump)
+            {
+                _highestYDuringJump = transform.position.y;
+            }
+        }
         HandleAnimation();
     }
     private void CheckGrounded()
@@ -435,14 +450,35 @@ public class PlayerController : NetworkBehaviour
     private void OnLand()
     {
         if (!IsOwner) return; // Efekty žádá pouze lokální hráč
+
+        // --- 1. METEOR SLAM (VÝBUCH PŘI DOPADU) ---
+        float fallDistance = _highestYDuringJump - transform.position.y;
+        
+        if (fallDistance >= _minFallDistanceForSlam)
+        {
+            // TADY NAPOJÍŠ SVŮJ UPGRADE SYSTÉM (Pro teď je tu natvrdo 10f pro test)
+            // Např: float slamDamage = _progression.GetStatBonus(StatType.SlamDamage);
+            float slamDamage = 10f; 
+
+            if (slamDamage > 0)
+            {
+                ExecuteSlamExplosionServerRpc(fallDistance, slamDamage);
+            }
+        }
+
+        // Resetujeme výšku pro další skok, abychom nevybuchli znova
+        _highestYDuringJump = transform.position.y;
+
+        // --- 2. BĚŽNÉ EFEKTY DOPADU ---
         GetComponentInChildren<PlayerSquashStretch>()?.TriggerLandSquash();
-        // 1. Spustíme VFX (prach)
+        
+        // Spustíme VFX (prach)
         if (_playerVFX != null)
         {
             _playerVFX.SpawnVFXServerRpc(PlayerVFX.VFX_Type.LandingDust);
         }
 
-        // 2. Přehrajeme Zvuk 
+        // Přehrajeme Zvuk 
         if (_playerAudio != null)
         {
             _playerAudio.RequestPlaySoundServerRpc(PlayerAudio.AUDIO_LAND);
@@ -686,14 +722,21 @@ public class PlayerController : NetworkBehaviour
 
     private void HandleJump()
     {
+        // 1. Získání základních hodnot
         int maxJumps = 1;
+        float currentJumpHeight = _jumpHeight;
+
+        // 2. Aplikace upgradů
         if (_progression != null)
+        {
             maxJumps += (int)_progression.GetStatBonus(StatType.JumpCount);
+            currentJumpHeight += _progression.GetStatBonus(StatType.JumpHeight); // Započítáme bonus k výšce
+        }
 
         // Zkontrolujeme, zda byl skok stisknut nedávno
         bool jumpInputBuffered = Time.time < _lastJumpInputTime + _jumpBufferDuration;
 
-        // Musíme být na zemi A mít "nabufferovaný" vstup
+        // Musíme mít "nabufferovaný" vstup A (být na zemi NEBO mít ještě dostupné skoky ve vzduchu)
         if (jumpInputBuffered && (_isGrounded || _currentJumpCount < maxJumps))
         {
             // --- Zde je "Provedení logiky skoku..." ---
@@ -703,21 +746,23 @@ public class PlayerController : NetworkBehaviour
             // Ověříme staminu
             if (_attributes.ConsumeStamina(_jumpStaminaCost))
             {
-                _currentJumpCount++;
+                _currentJumpCount++; // Zvýšíme počítadlo skoků
 
                 if (IsOwner)
                 {
                     SteamStatsManager.Instance.IncrementStat("stat_jumps_performed");
                 }
 
-                _playerVelocity.y = Mathf.Sqrt(_jumpHeight * -2f * _gravityValue);
+                // Vypočítáme a APLIKUJEME VÝŠKU SKOKU
+                // Toto funguje perfektně pro první skok i pro double jump, 
+                // protože to přemaže aktuální pádovou rychlost a vystřelí tě nahoru.
+                _playerVelocity.y = Mathf.Sqrt(currentJumpHeight * -2f * _gravityValue);
 
                 // Spustíme animaci (pošleme přes server všem)
                 TriggerAnimationServerRpc(_jumpTriggerHash);
                 GetComponentInChildren<PlayerSquashStretch>()?.TriggerJumpSquash();
 
-                if (_currentJumpCount > 1) _playerVelocity.y = Mathf.Sqrt(_jumpHeight * -2f * _gravityValue); // Můžeš dát menší výšku pro druhý skok
-
+                // Zvuk
                 if (IsOwner && _playerAudio != null)
                 {
                     _playerAudio.RequestPlaySoundServerRpc(PlayerAudio.AUDIO_JUMP);
@@ -725,19 +770,18 @@ public class PlayerController : NetworkBehaviour
 
                 // ZNEPLATNÍME BUFFERY
                 _lastJumpInputTime = 0f; // Vynulování bufferu skoku
-                _lastGroundedTime = 0f; // Vynulujeme Coyote time, abychom nemohli hned uskočit/skočit znovu
-                _isGrounded = false; // Vynutíme stav ve vzduchu
+                _lastGroundedTime = 0f;  // Vynulujeme Coyote time, abychom nemohli hned uskočit/skočit znovu
+                _isGrounded = false;     // Vynutíme stav ve vzduchu
+                _wasGroundedLastFrame = false; // Pojistka, aby se hned v dalším framu nespustil OnLand()
             }
             else if (IsOwner && _playerAudio != null)
             {
                 // Pokusil se skočit, ale nemá staminu
                 _playerAudio.RequestPlaySoundServerRpc(PlayerAudio.AUDIO_OUT_OF_STAMINA);
+                
+                // Vynulujeme buffer i zde, aby zvuk přehrál jen jednou na stisk a ne spamoval
+                _lastJumpInputTime = 0f; 
             }
-
-            // --- Konec logiky skoku ---
-
-            // Vynulování bufferu, aby se skok neprovedl vícekrát
-            _lastJumpInputTime = 0f;
         }
     }
 
@@ -1034,5 +1078,59 @@ public class PlayerController : NetworkBehaviour
             // Aplikujeme rotaci X (nahoru/dolů) i Y (doleva/doprava) POUZE na kameru
             _cameraFollowTarget.localRotation = Quaternion.Euler(_cameraPitch, _sittingYaw, 0);
         }
+    }
+
+    
+
+    [ServerRpc]
+    private void ExecuteSlamExplosionServerRpc(float fallDistance, float baseSlamDamage)
+    {
+        // 1. Výpočet síly dopadu (např. 5 metrů = 1x multiplikátor, 15 metrů = 3x multiplikátor)
+        float slamMultiplier = Mathf.Clamp(fallDistance / 5f, 1f, 5f); // Omezíme max multiplikátor na 5x, aby to nebylo OP
+
+        float finalRadius = 3f + (slamMultiplier * 1.5f); // Radius roste s výškou
+        int finalDamage = Mathf.RoundToInt(baseSlamDamage * slamMultiplier);
+
+        // 2. OverlapSphere (stejná logika jako máš v AoEExplosionEffect)
+        Collider[] hits = Physics.OverlapSphere(transform.position, finalRadius);
+        bool hitSomething = false;
+
+        foreach (var col in hits)
+        {
+            // Nepřátelé
+            if (col.TryGetComponent(out EnemyHealth enemy) || (enemy = col.GetComponentInParent<EnemyHealth>()))
+            {
+                enemy.TakeDamage(finalDamage, NetworkObjectId);
+
+                // Knockback (volitelné)
+                Vector3 knockDir = (enemy.transform.position - transform.position).normalized;
+                knockDir.y = 0.5f; // Přizvednutí do vzduchu
+                enemy.ApplyKnockback(knockDir * (10f * slamMultiplier));
+
+                hitSomething = true;
+            }
+            // Zničitelné bedny
+            else if (col.TryGetComponent(out DestructibleProp prop))
+            {
+                prop.TakeHit();
+            }
+        }
+
+        // 3. Vizuální a zvukový efekt
+        SpawnSlamVfxClientRpc(transform.position, finalRadius);
+    }
+
+    [ClientRpc]
+    private void SpawnSlamVfxClientRpc(Vector3 position, float radius)
+    {
+        if (_slamVfxPrefab == null) return;
+
+        // Spawne efekt prachu/kamenů na zemi
+        GameObject vfx = Instantiate(_slamVfxPrefab, position, Quaternion.identity);
+
+        // Škálování efektu podle toho, jak velký to byl výbuch
+        vfx.transform.localScale = Vector3.one * (radius / 3f);
+
+        Destroy(vfx, 3f); // Úklid paměti
     }
 }

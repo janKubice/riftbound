@@ -122,7 +122,10 @@ public abstract class EnemyBaseAI : NetworkBehaviour
         // 1. NEJDŘÍV vypnout agenta. Tím se zruší všechny probíhající výpočty cesty (Jobs).
         if (_agent != null)
         {
-            _agent.isStopped = true;
+            if (_agent.isActiveAndEnabled && _agent.isOnNavMesh)
+            {
+                _agent.isStopped = true;
+            }
             _agent.enabled = false; // Vypni komponentu
         }
 
@@ -197,6 +200,7 @@ public abstract class EnemyBaseAI : NetworkBehaviour
         _knockbackResistance = knockbackResistance;
         _xpReward = xp;
         _health.IsInvulnerable = false;
+        
 
         // Aplikace rychlosti na Agenta
         if (_agent != null)

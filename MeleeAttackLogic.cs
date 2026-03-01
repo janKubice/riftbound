@@ -1,130 +1,100 @@
 using UnityEngine;
 using Unity.Netcode;
-using Unity.VisualScripting.Antlr3.Runtime.Misc;
 
 [CreateAssetMenu(fileName = "MeleeAttack", menuName = "Attacks/Melee Logic")]
 public class MeleeAttackLogic : AttackLogic
 {
     private static readonly Collider[] _hitBuffer = new Collider[50];
 
-    public override void ExecuteAttack(NetworkObject attacker, WeaponManager weaponManager, Transform firePoint, WeaponStats stats)
+    public override void ExecuteAttack(NetworkObject attacker, WeaponManager weaponManager, Transform firePoint, WeaponStats stats, int projectileCountBonus = 0)
     {
-        Debug.Log("[MeleeAttackLogic] ExecuteAttack.");
-        // --- SERVER SIDE LOGIC ---
-
-        // 1. Definice oblasti útoku
-        // Posuneme střed mírně dopředu a nahoru, aby to lépe odpovídalo vizuálu
         Vector3 origin = attacker.transform.position + Vector3.up * 1.0f;
         Vector3 forward = attacker.transform.forward;
-
-        // Použijeme Range ze statů (vylepšitelné)
         float range = stats.Range > 0 ? stats.Range : 2.0f;
 
-        // 2. Detekce kolizí (NonAlloc pro výkon)
         int hitCount = Physics.OverlapSphereNonAlloc(origin, range, _hitBuffer);
-
         bool hitSomething = false;
+        
+        // --- MULTISHOT (MULTI-STRIKE) LOGIKA ---
+        int strikeCount = stats.ProjectileCount + projectileCountBonus; // Kolikrát dostane ránu
 
-        // 3. Procházení zasažených objektů
         for (int i = 0; i < hitCount; i++)
         {
             Collider hit = _hitBuffer[i];
+            if (hit.gameObject == attacker.gameObject || hit.isTrigger) continue;
 
-            // Ignorujeme sami sebe
-            if (hit.gameObject == attacker.gameObject) continue;
-            // Ignorujeme Triggery (např. loot na zemi)
-            if (hit.isTrigger) continue;
-
-            // 4. Kontrola úhlu (Cone of Fire)
             Vector3 dirToTarget = (hit.transform.position - origin).normalized;
             float angle = Vector3.Angle(forward, dirToTarget);
 
-            // Pokud je v úhlu záběru (polovina úhlu na každou stranu)
             if (angle <= stats.AttackAngle / 2f)
             {
-                // --- VÝPOČET POŠKOZENÍ (CRIT) ---
-                bool isCrit = Random.value < stats.CritChance;
-                int finalDamage = Mathf.RoundToInt(stats.Damage * (isCrit ? stats.CritMultiplier : 1.0f));
-
-                bool entityHit = false;
-
-                // A) Zásah Nepřítele
-                if (hit.TryGetComponent(out EnemyHealth enemy))
+                // Udělíme poškození X-krát (podle ProjectileCount)
+                for (int strike = 0; strike < strikeCount; strike++)
                 {
-                    // Aplikace Damage
-                    enemy.TakeDamage(finalDamage);
+                    bool isCrit = Random.value < stats.CritChance;
+                    int finalDamage = Mathf.RoundToInt(stats.Damage * (isCrit ? stats.CritMultiplier : 1.0f));
+                    bool entityHit = false;
 
-                    // Aplikace Knockbacku (Odhození)
-                    if (stats.Knockback > 0)
+                    // A) Zásah Nepřítele
+                    if (hit.TryGetComponent(out EnemyHealth enemy) || (enemy = hit.GetComponentInParent<EnemyHealth>()))
                     {
-                        // Směr od hráče k nepříteli (zploštělý na Y nulu, aby neletěli do nebe)
-                        Vector3 knockDir = (hit.transform.position - attacker.transform.position);
-                        knockDir.y = 0;
-                        enemy.ApplyKnockback(knockDir.normalized * stats.Knockback);
+                        enemy.TakeDamage(finalDamage);
+                        if (stats.Knockback > 0 && strike == 0) // Knockback jen při první ráně, ať neletí na Mars
+                        {
+                            Vector3 knockDir = (hit.transform.position - attacker.transform.position);
+                            knockDir.y = 0;
+                            enemy.ApplyKnockback(knockDir.normalized * stats.Knockback);
+                        }
+                        entityHit = true;
+                    }
+                    // B) Zásah Hráče
+                    else if (hit.TryGetComponent(out PlayerAttributes player))
+                    {
+                        player.TakeDamageServerRpc(finalDamage);
+                        entityHit = true;
                     }
 
-                    entityHit = true;
-                }
-
-                if (hit.TryGetComponent(out PlayerAttributes player))
-                {
-                    player.TakeDamageServerRpc(finalDamage);
-                    entityHit = true;
-                }
-
-                if (hit.TryGetComponent(out StatusEffectReceiver receiver))
-                {
-                    // Aplikujeme efekt definovaný ve zbrani
-                    if (stats.Effect != null && stats.Effect.Type != StatusEffectType.None)
+                    // C) Aplikace Status Efektu
+                    if (entityHit && stats.Effect != null && stats.Effect.Type != StatusEffectType.None)
                     {
-                        receiver.ApplyStatusEffect(stats.Effect);
+                        if (hit.TryGetComponent(out StatusEffectReceiver receiver)) receiver.ApplyStatusEffect(stats.Effect);
                     }
-                }
 
-                // --- 1. Zásah Foliage (Listí) ---
-                if (hit.TryGetComponent(out InteractiveFoliage foliage))
-                {
-                    Vector3 dir = (hit.transform.position - origin).normalized;
-                    foliage.OnHit(dir);
-                    // Melee útok listím projde, ale nepočítáme to jako "hitSomething" pro zvuk masivního zásahu
-                }
+                    // D) SPUŠTĚNÍ EFEKTŮ Z BATOHU (Každý strike = nový Meteor/Ricochet!)
+                    if (entityHit && stats.OnHitEffects != null)
+                    {
+                        foreach (var effect in stats.OnHitEffects)
+                        {
+                            if (effect != null) effect.OnHit(hit.ClosestPoint(origin), hit.gameObject, attacker, weaponManager);
+                        }
+                    }
 
-                // --- 2. Zásah Destructible Prop (Bedna) ---
-                else if (hit.TryGetComponent(out DestructibleProp prop))
-                {
-                    prop.TakeHit();
-                    hitSomething = true;
-                }
-
-                // C) Spawn Hit VFX
-                if (entityHit)
-                {
-                    hitSomething = true;
-                    // Najdeme nejbližší bod na collideru pro spawn krve/jisker
-                    Vector3 hitPos = hit.ClosestPoint(origin);
-                    weaponManager.SpawnMeleeImpact(hitPos);
-                }
-
-                if (!entityHit && !hit.isTrigger)
-                {
-                    // Označíme, že jsme trefili "něco" pevného -> spustí se VFX
-                    hitSomething = true;
-
-                    // Pro stromy to zavolá SpawnMeleeImpact, který (díky úpravě výše) zatřese stromem
-                    Vector3 hitPos = hit.ClosestPoint(origin);
-                    weaponManager.SpawnMeleeImpact(hitPos);
+                    // E) Vizuál a prostředí
+                    if (strike == 0) // Tyto věci stačí spustit jednou za švih
+                    {
+                        if (entityHit)
+                        {
+                            hitSomething = true;
+                            weaponManager.SpawnMeleeImpact(hit.ClosestPoint(origin));
+                        }
+                        else if (hit.TryGetComponent(out DestructibleProp prop))
+                        {
+                            prop.TakeHit();
+                            hitSomething = true;
+                        }
+                        else if (!hit.isTrigger)
+                        {
+                            hitSomething = true;
+                            weaponManager.SpawnMeleeImpact(hit.ClosestPoint(origin));
+                        }
+                    }
                 }
             }
         }
 
-        // Vyčistíme buffer
         System.Array.Clear(_hitBuffer, 0, hitCount);
-
-        // 5. Zpětná vazba pro útočníka
-        // Řekneme klientům, ať přehrají animaci švihu a trail
         weaponManager.OnWeaponFiredServerRpc(stats.Cooldown);
 
-        // Zvuk zásahu (pokud jsme něco trefili)
         if (hitSomething && attacker.TryGetComponent(out PlayerAudio audio))
         {
             audio.RequestPlaySoundServerRpc(PlayerAudio.AUDIO_HIT_DEALT);

@@ -47,7 +47,7 @@ public class DayNightCycle : MonoBehaviour
 
     private void Start()
     {
-        RenderSettings.ambientMode = UnityEngine.Rendering.AmbientMode.Flat;
+        RenderSettings.ambientMode = UnityEngine.Rendering.AmbientMode.Trilight;
     }
 
     private void Update()

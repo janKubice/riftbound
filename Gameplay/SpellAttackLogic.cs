@@ -9,7 +9,7 @@ public class SpellAttackLogic : AttackLogic
     public int HealAmount = 5; // Kolik vyléčí
     public Color SpellColor = Color.cyan; // Pro vizuál
 
-    public override void ExecuteAttack(NetworkObject attacker, WeaponManager weaponManager, Transform firePoint, WeaponStats stats)
+    public override void ExecuteAttack(NetworkObject attacker, WeaponManager weaponManager, Transform firePoint, WeaponStats stats, int projectileCountBonus = 0)
     {
         // 1. Oblast působení (kolem hráče)
         float radius = stats.Range > 0 ? stats.Range : 4.0f;
