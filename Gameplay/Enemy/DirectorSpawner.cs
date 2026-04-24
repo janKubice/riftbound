@@ -1,25 +1,30 @@
 using UnityEngine;
 using Unity.Netcode;
 using System.Collections.Generic;
-using TMPro;
+using System;
+using System.Collections;
 
 public class DirectorSpawner : NetworkBehaviour
 {
     public static DirectorSpawner Instance { get; private set; }
 
-    [Header("Enemy Database")]
-    [SerializeField] private List<EnemyDefinition> _allEnemies;
+    public enum SpawnerMode { Continuous, Wave }
 
-    [Header("Game Pace")]
-    [SerializeField] private float _baseCreditsPerSecond = 1.0f;
-    [SerializeField] private float _difficultyScaling = 0.1f;
-    [SerializeField] private int _maxEnemiesAlive = 200;
-    
-    [Header("Scaling Curve")]
+    [Header("Mode Settings")]
+    [Tooltip("Určuje, zda se hraje normální přežití nebo aréna (vlny).")]
+    public SpawnerMode CurrentMode = SpawnerMode.Continuous;
+
+    [Header("Difficulty")]
+    [SerializeField] private DifficultyProfile _currentDifficultyProfile;
+
+    [Header("Active Spawn Pool")]
+    [SerializeField] private SpawnPool _currentSpawnPool;
+
+    [Header("Stats Scaling")]
     [SerializeField] private float _exponentialScalingFactor = 1.1f;
 
     [Header("Performance Limits")]
-    [SerializeField] private int _maxSpawnsPerFrame = 2;
+    [SerializeField] private int _maxSpawnsPerFrame = 5;
 
     [Header("Safe Zone")]
     [SerializeField] private float _safeZoneRadius = 15.0f;
@@ -30,23 +35,38 @@ public class DirectorSpawner : NetworkBehaviour
     [Range(0, 1)][SerializeField] private float _eliteChance = 0.1f;
     [Range(0, 1)][SerializeField] private float _championChance = 0.02f;
 
-    private float _accumulatedCredits = 0;
-    private float _totalCredits = 0;
-    private float _gameTime = 0;
+    [Header("Wave Settings (Arena)")]
+    [SerializeField] private int _maxWaves = 10;
+    [SerializeField] private int _baseWaveEnemies = 10;
+    [SerializeField] private int _waveEnemyMultiplier = 5;
+    [SerializeField] private float _waveSpawnRate = 3.0f;
+    [SerializeField] private float _timeBetweenWaves = 5.0f;
+    [SerializeField] private float _wavePowerScale = 0.1f;      // Jak moc se zvyšuje síla nepřátel specificky s vlnou
+    public NetworkVariable<float> WaveCountdownNetVar = new NetworkVariable<float>(0f);
+
+    // --- Vnitřní stavy ---
+    private float _gameTimeMinutes = 0;
     private float _difficultyMultiplier = 1.0f;
+    private float _spawnAccumulator = 0f;
+
     private bool _hasGameStarted = false;
     private float _lastPlayerCheckTime;
     private bool _arePlayersActive = false;
-    
-    [SerializeField] private TextMeshProUGUI diffText;
-    private int _lastDisplayedDifficulty = -1;
+    private bool _isWaitingForNextWave = false;
 
     private HashSet<EnemySpawnPoint> _spawnPoints = new HashSet<EnemySpawnPoint>();
     private List<EnemySpawnPoint> _validPointsBuffer = new List<EnemySpawnPoint>(50);
-    private NetworkVariable<int> _enemiesAliveNetVar = new NetworkVariable<int>(0);
-
-    private EnemyDefinition[] _cachedEnemiesList;
     private int _terrainLayerMask;
+
+    // --- Network Variables (pro synchronizaci s UI) ---
+    public NetworkVariable<int> EnemiesAliveNetVar = new NetworkVariable<int>(0);
+    public NetworkVariable<int> CurrentWaveNetVar = new NetworkVariable<int>(0);
+    public NetworkVariable<int> EnemiesYetToSpawnNetVar = new NetworkVariable<int>(0);
+    public NetworkVariable<int> TotalWaveEnemiesNetVar = new NetworkVariable<int>(0);
+    public NetworkVariable<bool> IsWaveActiveNetVar = new NetworkVariable<bool>(false);
+    public NetworkVariable<int> CurrentDifficultyPercent = new NetworkVariable<int>(100);
+
+    public static event Action OnEnemySpawned;
 
     private void Awake()
     {
@@ -56,7 +76,7 @@ public class DirectorSpawner : NetworkBehaviour
             return;
         }
         Instance = this;
-        _terrainLayerMask = LayerMask.GetMask("Default", "Terrain");
+        _terrainLayerMask = LayerMask.GetMask("Enviroment");
     }
 
     public void RegisterSpawnPoint(EnemySpawnPoint sp) => _spawnPoints.Add(sp);
@@ -66,19 +86,18 @@ public class DirectorSpawner : NetworkBehaviour
     {
         if (IsServer)
         {
-            _enemiesAliveNetVar.Value = 0;
-            
-            // Seřazení a cachování do pole pro zamezení LINQ volání v Update
-            _allEnemies.Sort((a, b) => a.Cost.CompareTo(b.Cost));
-            _cachedEnemiesList = _allEnemies.ToArray();
+            EnemiesAliveNetVar.Value = 0;
+            CurrentWaveNetVar.Value = 0;
+            IsWaveActiveNetVar.Value = false;
         }
     }
 
+    // Voláno z EnemyHealth.cs při smrti
     public void EnemyDied()
     {
         if (IsServer)
         {
-            _enemiesAliveNetVar.Value = Mathf.Max(0, _enemiesAliveNetVar.Value - 1);
+            EnemiesAliveNetVar.Value = Mathf.Max(0, EnemiesAliveNetVar.Value - 1);
         }
     }
 
@@ -91,129 +110,173 @@ public class DirectorSpawner : NetworkBehaviour
             _lastPlayerCheckTime = Time.time;
             _arePlayersActive = CheckIfPlayersAreActive();
 
-            if (!_hasGameStarted && _arePlayersActive) _hasGameStarted = true;
+            if (!_hasGameStarted && _arePlayersActive)
+            {
+                _hasGameStarted = true;
+                if (CurrentMode == SpawnerMode.Wave)
+                {
+                    StartCoroutine(PrepareNextWaveRoutine());
+                }
+            }
         }
 
         if (!_hasGameStarted || (_canPauseGame && !_arePlayersActive)) return;
 
-        float dt = Time.deltaTime;
-        _gameTime += dt;
-        float minutes = _gameTime / 60f;
+        _gameTimeMinutes += (Time.deltaTime / 60f);
+        _difficultyMultiplier = Mathf.Pow(_exponentialScalingFactor, _gameTimeMinutes);
 
-        _difficultyMultiplier = Mathf.Pow(_exponentialScalingFactor, minutes);
+        // Update difficulty pro UI
+        CurrentDifficultyPercent.Value = Mathf.FloorToInt(_difficultyMultiplier * 100f);
 
-        float waveMultiplier = 1.0f + (Mathf.Sin(Time.time * 0.1f) * 0.5f);
-        float creditsIncome = _baseCreditsPerSecond * _difficultyMultiplier * dt * waveMultiplier;
-
-        _accumulatedCredits += creditsIncome;
-        _totalCredits += creditsIncome;
-
-        ProcessSpawnQueue();
-        UpdateUI();
+        if (CurrentMode == SpawnerMode.Continuous)
+        {
+            ProcessContinuousSpawning();
+        }
+        else if (CurrentMode == SpawnerMode.Wave)
+        {
+            ProcessWaveSpawning();
+        }
     }
 
-    private void ProcessSpawnQueue()
+    private void ProcessContinuousSpawning()
     {
-        if (_enemiesAliveNetVar.Value >= _maxEnemiesAlive)
+        float currentSpawnRate = _currentDifficultyProfile.SpawnRateCurve.Evaluate(_gameTimeMinutes);
+        int currentMaxEnemies = Mathf.RoundToInt(_currentDifficultyProfile.MaxEnemiesCurve.Evaluate(_gameTimeMinutes));
+
+        _spawnAccumulator += currentSpawnRate * Time.deltaTime;
+
+        if (EnemiesAliveNetVar.Value >= currentMaxEnemies)
         {
-            _accumulatedCredits = Mathf.Lerp(_accumulatedCredits, 0, Time.deltaTime * 0.3f);
+            _spawnAccumulator = Mathf.Lerp(_spawnAccumulator, 0, Time.deltaTime * 0.3f);
             return;
         }
 
         int spawnsThisFrame = 0;
-
-        while (_accumulatedCredits > 0 &&
-               spawnsThisFrame < _maxSpawnsPerFrame &&
-               _enemiesAliveNetVar.Value < _maxEnemiesAlive)
+        while (_spawnAccumulator >= 1.0f && spawnsThisFrame < _maxSpawnsPerFrame && EnemiesAliveNetVar.Value < currentMaxEnemies)
         {
-            EnemyDefinition enemyToSpawn = PickAffordableEnemy(_accumulatedCredits);
-            if (enemyToSpawn == null) break;
-
-            EnemySpawnPoint sp = GetSmartSpawnPoint();
-            if (sp == null) break;
-
-            EnemyTier tier = CalculateTier(sp.ZoneDifficulty);
-            float tierMult = GetTierMultiplier(tier);
-            float finalCost = enemyToSpawn.Cost * tierMult;
-
-            if (_accumulatedCredits < finalCost && tier != EnemyTier.Normal)
-            {
-                tier = EnemyTier.Normal;
-                tierMult = 1.0f;
-                finalCost = enemyToSpawn.Cost;
-            }
-
-            if (_accumulatedCredits >= finalCost)
-            {
-                SpawnEnemy(enemyToSpawn, tier, sp, tierMult);
-                _accumulatedCredits -= finalCost;
-                spawnsThisFrame++;
-            }
-            else
-            {
-                break;
-            }
+            SpawnSingleEnemy();
+            _spawnAccumulator -= 1.0f;
+            spawnsThisFrame++;
         }
     }
 
-    private EnemyDefinition PickAffordableEnemy(float budget)
+    private void ProcessWaveSpawning()
     {
-        int totalWeight = 0;
-        int validCount = 0;
+        if (!IsWaveActiveNetVar.Value || _isWaitingForNextWave) return;
 
-        // O(n) iterace přes pole, ukončí se jakmile narazí na dražší entitu (pole je seřazené)
-        for (int i = 0; i < _cachedEnemiesList.Length; i++)
+        if (EnemiesYetToSpawnNetVar.Value > 0)
         {
-            if (_cachedEnemiesList[i].Cost <= budget)
+            _spawnAccumulator += _waveSpawnRate * Time.deltaTime;
+            int spawnsThisFrame = 0;
+
+            while (_spawnAccumulator >= 1.0f &&
+                   spawnsThisFrame < _maxSpawnsPerFrame &&
+                   EnemiesYetToSpawnNetVar.Value > 0)
             {
-                totalWeight += (int)_cachedEnemiesList[i].Rarity;
-                validCount++;
+                SpawnSingleEnemy();
+                _spawnAccumulator -= 1.0f;
+                spawnsThisFrame++;
             }
-            else break;
         }
-
-        if (validCount == 0) return null;
-
-        int roll = Random.Range(0, totalWeight);
-        int current = 0;
-
-        for (int i = 0; i < validCount; i++)
+        else if (EnemiesAliveNetVar.Value <= 0)
         {
-            current += (int)_cachedEnemiesList[i].Rarity;
-            if (roll < current) return _cachedEnemiesList[i];
-        }
+            IsWaveActiveNetVar.Value = false;
 
-        return _cachedEnemiesList[0];
+            // --- MODIFIED LOGIC: Check for Victory ---
+            if (CurrentWaveNetVar.Value >= _maxWaves)
+            {
+                TriggerDemoVictory();
+            }
+            else
+            {
+                StartCoroutine(PrepareNextWaveRoutine());
+            }
+        }
+    }
+    private IEnumerator PrepareNextWaveRoutine()
+    {
+        _isWaitingForNextWave = true;
+
+        float timer = _timeBetweenWaves;
+        while (timer > 0)
+        {
+            WaveCountdownNetVar.Value = timer;
+            yield return new WaitForSeconds(0.1f);
+            timer -= 0.1f;
+        }
+        WaveCountdownNetVar.Value = 0f;
+
+        CurrentWaveNetVar.Value++;
+
+        int enemiesForWave = _baseWaveEnemies + (_waveEnemyMultiplier * (CurrentWaveNetVar.Value * CurrentWaveNetVar.Value));
+        EnemiesYetToSpawnNetVar.Value = enemiesForWave;
+        TotalWaveEnemiesNetVar.Value = enemiesForWave;
+
+        IsWaveActiveNetVar.Value = true;
+        _isWaitingForNextWave = false;
+    }
+
+    private void SpawnSingleEnemy()
+    {
+        EnemyDefinition enemyToSpawn = PickEnemyFromPool(_currentSpawnPool);
+        if (enemyToSpawn == null) return;
+
+        EnemySpawnPoint sp = GetSmartSpawnPoint();
+        if (sp == null) return;
+
+        EnemyTier tier = CalculateTier(sp.ZoneDifficulty);
+        float tierMult = GetTierMultiplier(tier);
+
+        SpawnEnemy(enemyToSpawn, tier, sp, tierMult);
+    }
+
+    // --- Zbytek původních metod (PickEnemyFromPool, SpawnEnemy, CheckIfPlayersAreActive, GetSmartSpawnPoint, CalculateTier, GetTierMultiplier) zůstává beze změny ---
+
+    private EnemyDefinition PickEnemyFromPool(SpawnPool pool)
+    {
+        if (pool == null || pool.Enemies.Count == 0) return null;
+        float roll = UnityEngine.Random.Range(0, pool.GetTotalWeight());
+        float currentWeight = 0;
+        for (int i = 0; i < pool.Enemies.Count; i++)
+        {
+            currentWeight += pool.Enemies[i].Weight;
+            if (roll <= currentWeight) return pool.Enemies[i].EnemyDef;
+        }
+        return pool.Enemies[0].EnemyDef;
     }
 
     private void SpawnEnemy(EnemyDefinition def, EnemyTier tier, EnemySpawnPoint sp, float tierMulti)
     {
-        Vector2 circle = Random.insideUnitCircle * sp.SpawnRadius;
+        Vector2 circle = UnityEngine.Random.insideUnitCircle * sp.SpawnRadius;
         Vector3 pos = sp.transform.position + new Vector3(circle.x, 0, circle.y);
 
-        if (Physics.Raycast(pos + Vector3.up * 10, Vector3.down, out RaycastHit hit, 20f, _terrainLayerMask))
+        if (Physics.Raycast(pos + Vector3.up * 20f, Vector3.down, out RaycastHit hit, 40f, _terrainLayerMask))
         {
-            pos = hit.point;
+            // Přidáme 0.2f k ose Y, aby collider nezačínal "vnořený" do země
+            pos = hit.point + Vector3.up * 0.2f;
+        }
+        else
+        {
+            Debug.LogWarning("DirectorSpawner: Nelze najít vhodnou pozici pro spawn nepřítele. Zkontrolujte nastavení spawn pointů a terénu.");
+            return;
         }
 
-        NetworkObject netObj = NetworkObjectPool.Instance != null 
-            ? NetworkObjectPool.Instance.GetNetworkObject(def.Prefab, pos, Quaternion.identity) 
-            : null;
+        OnEnemySpawned?.Invoke();
+        NetworkObject netObj = NetworkObjectPool.Instance != null ? NetworkObjectPool.Instance.GetNetworkObject(def.Prefab, pos, Quaternion.identity) : null;
 
         if (netObj != null)
         {
             if (!netObj.IsSpawned) netObj.Spawn(true);
-
             if (netObj.TryGetComponent(out EnemyBaseAI ai))
             {
                 float timeMulti = _difficultyMultiplier;
                 float zoneMulti = Mathf.Sqrt(sp.ZoneDifficulty);
-                float powerFactor = tierMulti * timeMulti * zoneMulti;
+                float waveMulti = (CurrentMode == SpawnerMode.Wave) ? (1f + (CurrentWaveNetVar.Value * 0.07f)) : 1f;
+                float powerFactor = tierMulti * timeMulti * zoneMulti * waveMulti;
 
                 int hp = Mathf.RoundToInt(def.BaseHealth * powerFactor);
                 int dmg = Mathf.RoundToInt(def.BaseDamage * powerFactor);
                 int xp = Mathf.CeilToInt(def.BaseXPDrop * (powerFactor * 0.8f));
-                
                 float speed = def.BaseSpeed * (1 + (timeMulti * 0.03f) + (tierMulti * 0.05f));
                 float atkRate = def.BaseAttackRate * (1 + Mathf.Clamp((tierMulti - 1) * 0.2f, 0, 0.5f));
                 float kbRes = def.BaseKnockbackResistance + (1 - def.BaseKnockbackResistance) * (1 - (1 / tierMulti));
@@ -221,13 +284,12 @@ public class DirectorSpawner : NetworkBehaviour
                 float baseScale = 1.0f;
                 float tierBonus = (tierMulti - 1.0f) * 0.2f;
                 float zoneBonus = (sp.ZoneDifficulty - 1) * 0.05f;
-                float randomJitter = Random.Range(-0.1f, 0.1f);
-                float finalScale = Mathf.Clamp(baseScale + tierBonus + zoneBonus + randomJitter, 0.8f, 3.0f);
+                float finalScale = Mathf.Clamp(baseScale + tierBonus + zoneBonus + UnityEngine.Random.Range(-0.1f, 0.1f), 0.8f, 3.0f);
 
                 ai.InitializeEnemy(tier, hp, dmg, speed, finalScale, atkRate, kbRes, xp, pos);
             }
-
-            _enemiesAliveNetVar.Value++;
+            EnemiesYetToSpawnNetVar.Value--;
+            EnemiesAliveNetVar.Value++;
         }
     }
 
@@ -235,17 +297,12 @@ public class DirectorSpawner : NetworkBehaviour
     {
         var clients = NetworkManager.Singleton.ConnectedClientsList;
         if (clients.Count == 0) return false;
-
         float sqrRadius = _safeZoneRadius * _safeZoneRadius;
         Vector3 directorPos = transform.position;
-
         for (int i = 0; i < clients.Count; i++)
         {
             var playerObj = clients[i].PlayerObject;
-            if (playerObj != null)
-            {
-                if ((directorPos - playerObj.transform.position).sqrMagnitude > sqrRadius) return true;
-            }
+            if (playerObj != null && (directorPos - playerObj.transform.position).sqrMagnitude > sqrRadius) return true;
         }
         return false;
     }
@@ -254,74 +311,61 @@ public class DirectorSpawner : NetworkBehaviour
     {
         var clients = NetworkManager.Singleton.ConnectedClientsList;
         if (clients.Count == 0 || _spawnPoints.Count == 0) return null;
-
-        var playerObj = clients[Random.Range(0, clients.Count)].PlayerObject;
+        var playerObj = clients[UnityEngine.Random.Range(0, clients.Count)].PlayerObject;
         if (playerObj == null) return null;
-        
+
         Vector3 playerPos = playerObj.transform.position;
         _validPointsBuffer.Clear();
-
-        float minDstSqr = 225f; 
-        float maxDstSqr = 2500f; 
 
         foreach (var sp in _spawnPoints)
         {
             if (!sp.gameObject.activeSelf) continue;
-
             float distSqr = (sp.transform.position - playerPos).sqrMagnitude;
-            if (distSqr > minDstSqr && distSqr < maxDstSqr)
-            {
-                _validPointsBuffer.Add(sp);
-            }
+            if (distSqr > 225f && distSqr < 2500f) _validPointsBuffer.Add(sp);
         }
 
-        if (_validPointsBuffer.Count > 0)
-        {
-            return _validPointsBuffer[Random.Range(0, _validPointsBuffer.Count)];
-        }
-
-        using (var enumerator = _spawnPoints.GetEnumerator())
-        {
-            if (enumerator.MoveNext()) return enumerator.Current;
-        }
-
+        if (_validPointsBuffer.Count > 0) return _validPointsBuffer[UnityEngine.Random.Range(0, _validPointsBuffer.Count)];
+        using (var enumerator = _spawnPoints.GetEnumerator()) if (enumerator.MoveNext()) return enumerator.Current;
         return null;
     }
 
     private EnemyTier CalculateTier(float zoneDifficulty)
     {
-        float roll = Random.value;
+        float roll = UnityEngine.Random.value;
         float zoneFactor = zoneDifficulty * 0.005f;
-
-        float finalEliteChance = Mathf.Clamp(_eliteChance + zoneFactor, 0f, 0.6f);
-        float finalChampionChance = Mathf.Clamp(_championChance + (zoneFactor * 0.2f), 0f, 0.15f);
-
-        if (roll < finalChampionChance) return EnemyTier.Boss;
-        if (roll < finalChampionChance + finalEliteChance) return EnemyTier.Elite;
-
+        if (roll < Mathf.Clamp(_championChance + (zoneFactor * 0.2f), 0f, 0.15f)) return EnemyTier.Boss;
+        if (roll < Mathf.Clamp(_championChance + (zoneFactor * 0.2f), 0f, 0.15f) + Mathf.Clamp(_eliteChance + zoneFactor, 0f, 0.6f)) return EnemyTier.Elite;
         return EnemyTier.Normal;
     }
 
-    private float GetTierMultiplier(EnemyTier tier)
+    /// <summary>
+    /// Stops the game loop and notifies all clients of the victory.
+    /// </summary>
+    private void TriggerDemoVictory()
     {
-        return tier switch
-        {
-            EnemyTier.Elite => 2.5f,
-            EnemyTier.Champion => 6.0f,
-            EnemyTier.Boss => 25.0f,
-            _ => 1.0f,
-        };
+        _hasGameStarted = false; // Stops difficulty scaling and further updates
+
+        // Notify all clients to show the end screen
+        ShowVictoryScreenClientRpc();
     }
 
-    private void UpdateUI()
+    [ClientRpc]
+    private void ShowVictoryScreenClientRpc()
     {
-        if (diffText == null) return;
+        Debug.Log("[Client] All waves completed! Triggering Victory Screen.");
 
-        int currentDiff = Mathf.FloorToInt(_totalCredits);
-        if (currentDiff != _lastDisplayedDifficulty)
+        if (EndScreenUI.Instance != null)
         {
-            _lastDisplayedDifficulty = currentDiff;
-            diffText.SetText("Difficulty: <color=red>{0:F1}</color>", _totalCredits);
+            EndScreenUI.Instance.Show("VICTORY!", "You have survived all waves and completed the demo.\nThank you for playing!");
+        }
+        else
+        {
+            Debug.LogError("EndScreenUI Instance is missing from the scene!");
         }
     }
+
+    private float GetTierMultiplier(EnemyTier tier) => tier switch { EnemyTier.Elite => 2.5f, EnemyTier.Champion => 6.0f, EnemyTier.Boss => 25.0f, _ => 1.0f };
+
+    public void SetActivePool(SpawnPool newPool) { _currentSpawnPool = newPool; _currentSpawnPool.GetTotalWeight(); }
+    public void SetDifficultyProfile(DifficultyProfile newProfile) { _currentDifficultyProfile = newProfile; }
 }

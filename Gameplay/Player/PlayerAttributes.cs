@@ -164,7 +164,22 @@ public class PlayerAttributes : NetworkBehaviour
 
     private void HandleHealthChanged(int previousValue, int newValue)
     {
-        if (IsOwner) OnLocalPlayerHealthChanged?.Invoke(newValue, MaxHealth.Value);
+        if (IsOwner)
+        {
+            OnLocalPlayerHealthChanged?.Invoke(newValue, MaxHealth.Value);
+
+            // Logika pro Health Critical zvuk
+            float criticalThreshold = MaxHealth.Value * 0.3f; // 30% zdraví
+
+            // Pokud zdraví KLESNE pod hranici (ověříme previousValue, aby zvuk nehrál pořád dokola)
+            if (newValue <= criticalThreshold && previousValue > criticalThreshold)
+            {
+                if (_playerAudio != null)
+                {
+                    _playerAudio.RequestPlaySoundServerRpc(PlayerAudio.AUDIO_HEALTH_CRITICAL);
+                }
+            }
+        }
     }
 
     private void HandleStaminaChanged(float previousValue, float newValue)
@@ -291,9 +306,10 @@ public class PlayerAttributes : NetworkBehaviour
     // --- Ostatní veřejné metody (Combat, Heal, Upgrade) ---
 
     [ServerRpc(RequireOwnership = false)]
-    public void TakeDamageServerRpc(int amount)
+    public void TakeDamageServerRpc(int amount, ulong attackerId = ulong.MaxValue)
     {
         if (CurrentHealth.Value <= 0 || IsInvulnerable.Value) return;
+        if (attackerId != ulong.MaxValue && attackerId == OwnerClientId) return; // Ochrana proti self-damage
 
         CurrentHealth.Value -= amount;
 
@@ -317,7 +333,24 @@ public class PlayerAttributes : NetworkBehaviour
             }
             else
             {
-                Respawn();
+                // ZMĚNA: Upozorníme klienta, že zemřel, aby si ukázal End Screen
+                NotifyDeathClientRpc(OwnerClientId);
+
+                // Původní respawn můžeš zakomentovat, pokud pro demo znamená smrt = konec
+                // Respawn(); 
+            }
+        }
+    }
+
+    [ClientRpc]
+    private void NotifyDeathClientRpc(ulong targetClientId)
+    {
+        // Spustit UI POUZE pro hráče, kterého se to týká
+        if (NetworkManager.Singleton.LocalClientId == targetClientId)
+        {
+            if (EndScreenUI.Instance != null)
+            {
+                EndScreenUI.Instance.Show("YOU DIED", "Thanks for playing the demo!\nTry again and do better.");
             }
         }
     }

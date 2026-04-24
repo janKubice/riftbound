@@ -2,65 +2,113 @@ using UnityEngine;
 
 public class CloudManager : MonoBehaviour
 {
-    [Header("Nastavení Mraků")]
+    private struct CloudData
+    {
+        public Transform Transform;
+        public float Speed;
+    }
+
+    [Header("Prefabs & Count")]
     [SerializeField] private GameObject[] _cloudPrefabs;
-    [SerializeField] private int _cloudCount = 20;
+    [SerializeField] private int _cloudCount = 30;
 
-    [Header("Oblast (Spawn Area)")]
-    [Tooltip("Velikost boxu, ve kterém mraky létají")]
-    [SerializeField] private Vector3 _areaSize = new Vector3(200, 20, 200);
+    [Header("Spawn Area")]
+    [Tooltip("Doporučuji výrazně zvětšit, např. 500x50x500")]
+    [SerializeField] private Vector3 _areaSize = new Vector3(500, 50, 500);
 
-    [Header("Rychlost Větru")]
-    [SerializeField] private float _minSpeed = 2.0f;
-    [SerializeField] private float _maxSpeed = 8.0f;
+    [Header("Visuals & Scale")]
+    [Tooltip("Rozsah náhodného zvětšení. Pokud jsou mraky malé, zvedni tyto hodnoty.")]
+    [SerializeField] private Vector2 _scaleRange = new Vector2(5f, 15f);
+    [Tooltip("Zapnout pouze pokud mraky vypadají dobře z každého úhlu nasvícení.")]
+    [SerializeField] private bool _randomizeYRotation = false; 
+
+    [Header("Wind Settings")]
+    [SerializeField] private float _baseSpeed = 5.0f;
+    [SerializeField] private float _speedVariation = 2.0f;
+    [SerializeField] private Vector3 _windDirection = new Vector3(1, 0, 0); 
+
+    private CloudData[] _clouds;
+    private float _leftBound;
+    private float _rightBound;
 
     private void Start()
     {
-        SpawnClouds();
+        InitializeClouds();
     }
 
-    private void SpawnClouds()
+    private void InitializeClouds()
     {
-        // Vypočítáme lokální hranice (od středu boxu doleva a doprava)
-        float startX = -_areaSize.x / 2; // Levá strana (např. -100)
-        float endX = _areaSize.x / 2;    // Pravá strana (např. +100)
+        if (_cloudPrefabs == null || _cloudPrefabs.Length == 0) return;
+
+        _clouds = new CloudData[_cloudCount];
+        _windDirection = _windDirection.normalized;
+        _leftBound = -_areaSize.x / 2;
+        _rightBound = _areaSize.x / 2;
 
         for (int i = 0; i < _cloudCount; i++)
         {
             GameObject prefab = _cloudPrefabs[Random.Range(0, _cloudPrefabs.Length)];
-
-            // Instanciace
-            GameObject cloud = Instantiate(prefab);
             
-            // DŮLEŽITÉ: Nastavíme CloudManager jako rodiče
-            cloud.transform.SetParent(this.transform);
+            // Instanciace rovnou pod rodiče
+            GameObject cloudObj = Instantiate(prefab, transform);
 
-            // Vygenerujeme náhodnou pozici v rámci boxu (LOKÁLNĚ)
-            Vector3 randomLocalPos = new Vector3(
-                Random.Range(startX, endX),          // Náhodně na ose X (aby nezačínaly všechny stejně)
-                Random.Range(-_areaSize.y / 2, _areaSize.y / 2), // Výška
-                Random.Range(-_areaSize.z / 2, _areaSize.z / 2)  // Hloubka
+            // Generování lokální pozice
+            Vector3 localPos = new Vector3(
+                Random.Range(_leftBound, _rightBound),
+                Random.Range(-_areaSize.y / 2, _areaSize.y / 2),
+                Random.Range(-_areaSize.z / 2, _areaSize.z / 2)
             );
+            cloudObj.transform.localPosition = localPos;
 
-            cloud.transform.localPosition = randomLocalPos;
+            // Měřítko
+            float scale = Random.Range(_scaleRange.x, _scaleRange.y);
+            
+            // Low-poly mraky často vypadají lépe, když jsou mírně roztažené do šířky
+            cloudObj.transform.localScale = new Vector3(scale * Random.Range(1f, 1.3f), scale, scale * Random.Range(1f, 1.3f));
 
-            // Náhodná rotace a velikost
-            cloud.transform.localRotation = Quaternion.Euler(0, Random.Range(0, 360), 0);
-            float scale = Random.Range(0.8f, 1.5f);
-            cloud.transform.localScale = Vector3.one * scale;
+            if (_randomizeYRotation)
+            {
+                cloudObj.transform.localRotation = Quaternion.Euler(0, Random.Range(0, 360), 0);
+            }
 
-            // Inicializace pohybu
-            CloudMovement movement = cloud.AddComponent<CloudMovement>();
-            // Posíláme mu lokální souřadnice startu a konce
-            movement.Initialize(Random.Range(_minSpeed, _maxSpeed), startX, endX);
+            // Paralaxa: Větší (a hypoteticky bližší) mraky se hýbou mírně odlišně
+            float scaleFactor = (scale - _scaleRange.x) / (_scaleRange.y - _scaleRange.x);
+            float finalSpeed = (_baseSpeed + Random.Range(-_speedVariation, _speedVariation)) * (1.0f + (scaleFactor * 0.3f));
+            
+            _clouds[i] = new CloudData
+            {
+                Transform = cloudObj.transform,
+                Speed = finalSpeed
+            };
+        }
+    }
+
+    private void Update()
+    {
+        // Všechny mraky posouváme v jednom cyklu. Odpadá režie na volání desítek Update() metod.
+        float dt = Time.deltaTime;
+        Vector3 movementStep = _windDirection * dt;
+
+        for (int i = 0; i < _clouds.Length; i++)
+        {
+            Transform t = _clouds[i].Transform;
+            Vector3 pos = t.localPosition;
+            
+            pos += movementStep * _clouds[i].Speed;
+
+            // Endless looping (Wrap-around na ose X)
+            if (_windDirection.x > 0 && pos.x > _rightBound) 
+                pos.x = _leftBound;
+            else if (_windDirection.x < 0 && pos.x < _leftBound) 
+                pos.x = _rightBound;
+
+            t.localPosition = pos;
         }
     }
 
     private void OnDrawGizmos()
     {
-        // Nakreslíme box, abyste viděli, kde mraky budou
         Gizmos.color = new Color(0, 1, 1, 0.3f);
-        // Matrix zajistí, že se Gizmo otáčí spolu s objektem
         Gizmos.matrix = transform.localToWorldMatrix;
         Gizmos.DrawCube(Vector3.zero, _areaSize);
     }

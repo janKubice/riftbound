@@ -74,7 +74,7 @@ public class ExplosiveProjectile : NetworkBehaviour
             // B) Hráči (PvP)
             else if (hit.TryGetComponent(out PlayerAttributes player))
             {
-                player.TakeDamageServerRpc(_stats.Damage);
+                player.TakeDamageServerRpc(_stats.Damage, _ownerId); 
             }
         }
 

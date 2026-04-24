@@ -2,6 +2,7 @@ using UnityEngine;
 using Unity.Netcode;
 using System.Collections.Generic;
 using UnityEngine.InputSystem;
+using System;
 
 public class WeaponManager : NetworkBehaviour
 {
@@ -42,6 +43,8 @@ public class WeaponManager : NetworkBehaviour
     [SerializeField] private WeaponVisualsController _visuals;
     private PlayerAiming _aiming;
     private PlayerProgression _progression;
+
+    public static event Action OnLocalWeaponEquipped;
 
     public override void OnNetworkSpawn()
     {
@@ -112,7 +115,7 @@ public class WeaponManager : NetworkBehaviour
     private void LateUpdate()
     {
         // 1. Ověříme, že držíme kontinuální zbraň (Laser)
-        if (_currentWeaponData != null && _currentWeaponData.IsContinuous)
+        if (_currentWeaponData != null && _currentWeaponData.IsLaserWeapon)
         {
             // 2. Ověříme síťovou proměnnou (zda se střílí)
             if (_isContinuousFiring.Value)
@@ -184,6 +187,10 @@ public class WeaponManager : NetworkBehaviour
     {
         // RPC pouze předá volání serverové metodě
         SetWeaponOnServer(newWeaponIndex);
+        if (IsOwner)
+        {
+            OnLocalWeaponEquipped?.Invoke();
+        }
     }
 
     [ServerRpc]

@@ -20,22 +20,17 @@ public class LootManager : NetworkBehaviour
     /// <summary>
     /// HLAVNÍ METODA: Zavolá se na serveru (např. když umře mob).
     /// </summary>
-    public void SpawnLoot(Vector3 position, LootTable table)
+    public void SpawnLoot(Vector3 position, LootTable table, float amountMultiplier = 1.0f)
     {
         if (!IsServer || table == null) return;
 
-        // 1. Vybereme, co má padnout
-        if (table.TryGetLoot(out LootEntry entry, out int amount))
+        // Použijeme tvou novou metodu z LootTable, která škáluje 'amount'
+        if (table.TryGetLootModified(amountMultiplier, out LootEntry entry, out int amount))
         {
-            // 2. Rozhodneme, komu to padne
-            // V Survivor hrách padá loot buď všem (každý má svůj), nebo jen tomu, kdo zabil.
-            // Zde uděláme variantu: Každý hráč dostane svůj vlastní loot (instanced loot).
-            
             foreach (var client in NetworkManager.Singleton.ConnectedClientsList)
             {
                 if (client.PlayerObject != null)
                 {
-                    // Pošleme RPC konkrétnímu klientovi
                     ClientRpcParams clientParams = new ClientRpcParams
                     {
                         Send = new ClientRpcSendParams { TargetClientIds = new ulong[] { client.ClientId } }
@@ -51,7 +46,7 @@ public class LootManager : NetworkBehaviour
     private void SpawnLootClientRpc(Vector3 position, LootType type, int amount, ClientRpcParams clientParams = default)
     {
         GameObject prefabToSpawn = _xpOrbPrefab;
-        
+
         // Výběr prefabu podle typu
         switch (type)
         {
@@ -63,7 +58,7 @@ public class LootManager : NetworkBehaviour
         {
             // Instancujeme lokální objekt (bez sítě)
             GameObject orbObj = Instantiate(prefabToSpawn, position, Quaternion.identity);
-            
+
             // Inicializace
             CollectableOrb orbScript = orbObj.GetComponent<CollectableOrb>();
             if (orbScript != null)

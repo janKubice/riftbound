@@ -8,4 +8,5 @@ public enum StatusEffectType
     Weakness, // Snížení damage nepřítele
     Buff,
     Poison, // DoT + snížení efektivity léčení
+    Heal
 }

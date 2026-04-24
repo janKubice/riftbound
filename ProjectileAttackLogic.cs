@@ -42,7 +42,7 @@ public class ProjectileAttackLogic : AttackLogic
 
         for (int i = 0; i < count; i++)
         {
-            float currentAngle = startAngle + (angleStep * i);
+            float currentAngle = count > 1 ? startAngle + (angleStep * i) : 0f;
             
             // Rotace výstřelu podle rozptylu (přičítáme k naší vypočítané attackRotation)
             // Pozor: Spread aplikujeme lokálně k rotaci (proto násobení zprava)

@@ -65,7 +65,7 @@ public class Projectile : NetworkBehaviour
 
         if (collision.gameObject.TryGetComponent<PlayerAttributes>(out PlayerAttributes playerAttr))
         {
-            playerAttr.TakeDamageServerRpc(_damage);
+            playerAttr.TakeDamageServerRpc(_damage, 1);
         }
 
         // VFX Broadcast

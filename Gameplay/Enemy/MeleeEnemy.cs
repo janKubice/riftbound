@@ -38,9 +38,9 @@ public class MeleeEnemy : EnemyBaseAI
     [SerializeField] private int _attackSoundIndex = 2;
 
 
-
-    // Ukládáme původní rotaci modelu (fix pro modely s offsetem)
+    // --- PRIVÁTNÍ PROMĚNNÉ ---
     private Quaternion _baseLocalRotation;
+    private Quaternion _facingRotation; // Čisté natočení k hráči (osa Y)
     private Transform _visualRoot;
     private NetworkedAudioSource _netAudio;
 
@@ -54,14 +54,21 @@ public class MeleeEnemy : EnemyBaseAI
         _attackRangeSqr = _attackRange * _attackRange;
         _netAudio = GetComponent<NetworkedAudioSource>();
 
-        // 1. Najdeme vizuální model
+        // 1. Získáme správný vizuální kořen bez ohledu na strukturu objektů
         if (_modelRenderer != null)
+        {
             _visualRoot = _modelRenderer.transform;
+        }
         else
-            _visualRoot = transform.GetChild(0);
+        {
+            // Pokud není renderer přiřazen, zkusíme najít prvního potomka. 
+            // Pokud nemá potomky, fallback na samotný root.
+            _visualRoot = transform.childCount > 0 ? transform.GetChild(0) : transform;
+        }
 
-        // 2. Uložíme si, jak byl model otočený v Inspectoru (KLÍČOVÁ OPRAVA)
+        // 2. Uložíme výchozí rotace pro správné matematické operace
         _baseLocalRotation = _visualRoot.localRotation;
+        _facingRotation = transform.rotation;
     }
 
     public override void BehaviorLogic()
@@ -89,19 +96,42 @@ public class MeleeEnemy : EnemyBaseAI
         }
     }
 
-    // Vlastní metoda pro rotaci, abychom nespoléhali na base class
+    // Vypočítá plynulou rotaci za hráčem (pouze v ose Y)
     private void RotateTowardsTarget()
     {
         if (TargetPlayer == null) return;
 
         Vector3 dir = (TargetPlayer.position - transform.position).normalized;
-        dir.y = 0; // Nechceme se naklánět nahoru/dolů celým tělem
+        dir.y = 0; // Zabráníme naklánění celého těla do země/do vzduchu
 
         if (dir != Vector3.zero)
         {
             Quaternion targetRot = Quaternion.LookRotation(dir);
-            // Rychlá rotace, ale ne instantní
-            transform.rotation = Quaternion.RotateTowards(transform.rotation, targetRot, 720f * Time.deltaTime);
+            // Rotaci zatím ukládáme jen do pomocné proměnné
+            _facingRotation = Quaternion.RotateTowards(_facingRotation, targetRot, 720f * Time.deltaTime);
+        }
+
+        // Pokud neútočíme, rovnou otáčíme celým objektem
+        if (!_isAttacking)
+        {
+            transform.rotation = _facingRotation;
+        }
+    }
+
+    // Centrální metoda pro čistou aplikaci rotace (Otáčení za hráčem + Animace náklonu)
+    private void ApplyAttackRotation(float currentPitch)
+    {
+        if (_visualRoot == transform)
+        {
+            // Model je přímo na hlavním objektu. Musíme obě rotace sečíst do jedné globální rotace.
+            transform.rotation = _facingRotation * Quaternion.Euler(currentPitch, 0, 0);
+        }
+        else
+        {
+            // Model je Child (ideální struktura).
+            // Hlavní tělo se otáčí za hráčem, hlava/model se naklání lokálně.
+            transform.rotation = _facingRotation;
+            _visualRoot.localRotation = Quaternion.Euler(currentPitch, 0, 0) * _baseLocalRotation;
         }
     }
 
@@ -111,55 +141,43 @@ public class MeleeEnemy : EnemyBaseAI
         IsMovementPaused = true;
         _lastAttackTime = Time.time;
 
-        // --- FÁZE 1: WINDUP (Nápřah + Tracking) ---
-        // Spustíme VFX nabíjení
         SpawnChargeVFXClientRpc();
-
         float timer = 0f;
 
+        // --- FÁZE 1: WINDUP (Nápřah + Tracking) ---
         while (timer < _windupTime)
         {
             timer += Time.deltaTime;
             float progress = timer / _windupTime;
             float curveVal = _windupCurve.Evaluate(progress);
-
-            // Výpočet úhlu záklonu
             float currentPitch = Mathf.Lerp(0, _maxLeanBackAngle, curveVal);
 
-            // APLIKACE ROTACE: Nejdřív Pitch, pak Base Rotation
-            // Tím zajistíme, že se nakloní "dopředu" z pohledu modelu, ať je otočený jakkoliv
-            _visualRoot.localRotation = Quaternion.Euler(currentPitch, 0, 0) * _baseLocalRotation;
-
-            // Důležité: Stále se točíme za hráčem (Tracking)
+            // Spočítáme rotaci k hráči a rovnou ji smícháme s náklonem
             RotateTowardsTarget();
-
+            ApplyAttackRotation(currentPitch);
+            
             yield return null;
         }
 
         // --- FÁZE 2: LOCK (Zamknutí cíle) ---
-        // Krátká pauza, kdy se nepřítel přestane točit.
-        // Hráč má teď šanci uskočit do strany (Skill check).
+        // Už nevoláme RotateTowardsTarget, cíl má čas uhnout
         yield return new WaitForSeconds(_lockTime);
 
         // --- FÁZE 3: STRIKE (Úder) ---
-        // Zvuk útoku ("Huuuuh!")
         if (_netAudio != null) _netAudio.PlayOneShotNetworked(_attackSoundIndex);
 
         timer = 0f;
-        Quaternion preAttackRot = _visualRoot.localRotation;
-        // Cílová rotace (hlava dopředu + base rotace)
-        Quaternion strikeRot = Quaternion.Euler(_maxHeadbuttAngle, 0, 0) * _baseLocalRotation;
+        float startPitch = _maxLeanBackAngle;
 
         while (timer < _strikeTime)
         {
             timer += Time.deltaTime;
             float progress = timer / _strikeTime;
-            // Exponenciální zrychlení (prudký úder)
-            progress = progress * progress;
+            progress = progress * progress; // Exponenciální zrychlení úderu
 
-            _visualRoot.localRotation = Quaternion.Lerp(preAttackRot, strikeRot, progress);
-
-            // ZDE UŽ NENÍ RotateTowardsTarget() -> Útočí rovně tam, kam se díval naposled
+            float currentPitch = Mathf.Lerp(startPitch, _maxHeadbuttAngle, progress);
+            ApplyAttackRotation(currentPitch);
+            
             yield return null;
         }
 
@@ -169,19 +187,23 @@ public class MeleeEnemy : EnemyBaseAI
         // --- FÁZE 5: RECOVERY (Návrat) ---
         timer = 0f;
         float recoveryTime = 0.5f;
-        Quaternion currentRot = _visualRoot.localRotation;
 
         while (timer < recoveryTime)
         {
             timer += Time.deltaTime;
-            // Pomalý návrat do základní rotace
-            _visualRoot.localRotation = Quaternion.Lerp(currentRot, _baseLocalRotation, timer / recoveryTime);
+            float currentPitch = Mathf.Lerp(_maxHeadbuttAngle, 0f, timer / recoveryTime);
+            ApplyAttackRotation(currentPitch);
+            
             yield return null;
         }
 
-        // Jistota na závěr
-        _visualRoot.localRotation = _baseLocalRotation;
-
+        // --- ČISTÝ RESET NA KONCI ÚTOKU ---
+        if (_visualRoot != transform)
+        {
+            _visualRoot.localRotation = _baseLocalRotation;
+        }
+        transform.rotation = _facingRotation;
+        
         _isAttacking = false;
         IsMovementPaused = false;
     }
@@ -190,18 +212,29 @@ public class MeleeEnemy : EnemyBaseAI
     {
         if (TargetPlayer == null) return;
 
-        // Získání bodu úderu (před nepřítelem)
-        Vector3 strikePoint = transform.position + transform.forward * 1.2f;
+        // 1. Získáme směr dopředu z čisté rotace k hráči (ignorujeme náklon těla/hlavy do země)
+        Vector3 forwardDir = _facingRotation * Vector3.forward;
+        
+        // Získání bodu úderu
+        Vector3 strikePoint = transform.position + forwardDir * 1.2f;
 
-        // Kvadratická vzdálenost eliminuje náročnou operaci odmocniny (Vector3.Distance)
-        float distSqr = (strikePoint - TargetPlayer.position).sqrMagnitude;
+        // 2. Zarovnáme pozici hráče do stejné výšky jako strikePoint. 
+        // Tím měříme vzdálenost čistě ve 2D (osy X a Z), což eliminuje chybování na schodech/kopečcích.
+        Vector3 flatPlayerPosition = new Vector3(TargetPlayer.position.x, strikePoint.y, TargetPlayer.position.z);
 
-        // Porovnání s druhou mocninou poloměru zásahu (1.5 * 1.5 = 2.25)
+        // Kvadratická vzdálenost
+        float distSqr = (strikePoint - flatPlayerPosition).sqrMagnitude;
+
         if (distSqr <= 2.25f)
         {
-            if (TargetPlayer.TryGetComponent(out PlayerAttributes player))
+            // 3. Hledáme atributy v nadřazené struktuře (řeší problém, kdy TargetPlayer je Child objekt hráče)
+            PlayerAttributes player = TargetPlayer.GetComponentInParent<PlayerAttributes>();
+            
+            if (player != null)
             {
-                player.TakeDamageServerRpc(_damage);
+                // Třída PlayerAttributes má [ServerRpc(RequireOwnership = false)],
+                // takže toto volání ze serverové AI proběhne korektně.
+                player.TakeDamageServerRpc(_damage, 1); // 1 jako ID nepřítele
 
                 // Lokální aplikace VFX bez RPC
                 Vector3 hitPos = TargetPlayer.position + Vector3.up * 1.0f;

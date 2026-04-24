@@ -1,133 +1,250 @@
 using UnityEngine;
-using UnityEngine.InputSystem; // Nutný namespace
+using UnityEngine.InputSystem;
 using System.IO;
-using UnityEngine.Rendering;
+using System.Collections;
+using System.Collections.Generic;
+using System.Threading.Tasks;
 using UnityEngine.Rendering.Universal;
 
 public class PhotoCam : MonoBehaviour
 {
+    [System.Serializable]
+    public struct PathNode
+    {
+        public Vector3 position;
+        public Quaternion rotation;
+        public float fov;
+    }
+
     [Header("Setup")]
     public Camera gameCamera;
-    public Volume globalVolume;
 
     [Header("Controls")]
     public Key toggleKey = Key.F8;
     public Key hideUIKey = Key.H;
     public Key pauseKey = Key.P;
+    public Key captureKey = Key.K;
 
-    [Header("Defaults")]
+    [Header("Cinematic Path")]
+    public Key addNodeKey = Key.N;
+    public Key clearPathKey = Key.C;
+    public Key playPathKey = Key.M;
+    public float pathDuration = 10f;
+    public int targetFPS = 30;
+    public bool saveFramesToDisk = true;
+
+    [Header("Camera Settings")]
     public float defaultMoveSpeed = 5f;
-    public float defaultFov = 60f;
-
-    [Header("Capture")]
     public int superSize = 4;
 
-    // --- Interní stav ---
     private bool _isActive = false;
     private bool _isGamePaused = true;
     private bool _hideUI = false;
+    private float _timeScaleMultiplier = 1f;
 
     private Camera _photoCam;
     private UniversalAdditionalCameraData _photoCamData;
-    private UniversalAdditionalCameraData _gameCamData;
     private AudioListener _photoListener;
-    
-    // Pohyb
+
     private Vector3 _targetPos;
     private Quaternion _targetRot;
     private float _targetFOV;
     private float _yaw, _pitch, _roll;
-    
-    // Nastavení (editovatelné v GUI)
     private float _moveSpeed;
-    private float _focusDist = 10f;
-    private float _aperture = 5.6f;
-    private bool _autoFocus = true;
 
-    // DoF
-    private DepthOfField _dof;
-
-    // Cache
-    private float _originalTimeScale;
     private bool _wasCursorVisible;
     private CursorLockMode _wasCursorLock;
+    private Canvas[] _cachedCanvases;
+
+    // Path Recording State
+    private List<PathNode> _pathNodes = new List<PathNode>();
+    private Camera _cinematicCam;
+    private RenderTexture _captureTexture;
+    private bool _isPathPlaying = false;
+    private string _currentSessionDir;
 
     private void Awake()
     {
-        _photoCam = GetComponent<Camera>();
-        _photoCamData = GetComponent<UniversalAdditionalCameraData>();
-        
-        // Přidat AudioListener
-        if (!TryGetComponent(out _photoListener))
-            _photoListener = gameObject.AddComponent<AudioListener>();
+        if (gameCamera == null) gameCamera = Camera.main;
+
+        GameObject photoCamObj = new GameObject("PhotoCam_Internal");
+        photoCamObj.transform.SetParent(transform);
+        photoCamObj.transform.localPosition = Vector3.zero;
+        photoCamObj.transform.localRotation = Quaternion.identity;
+
+        _photoCam = photoCamObj.AddComponent<Camera>();
+        _photoCamData = photoCamObj.AddComponent<UniversalAdditionalCameraData>();
+        _photoListener = photoCamObj.AddComponent<AudioListener>();
 
         _photoCam.enabled = false;
         _photoListener.enabled = false;
-        
-        // Získání DoF
-        if (globalVolume != null && globalVolume.profile != null)
+        _moveSpeed = defaultMoveSpeed;
+
+        SetupCinematicCamera();
+    }
+
+    private void SetupCinematicCamera()
+    {
+        GameObject camObj = new GameObject("Cinematic_Background_Cam");
+        camObj.transform.SetParent(transform);
+        camObj.transform.localPosition = Vector3.zero;
+        camObj.transform.localRotation = Quaternion.identity;
+
+        _cinematicCam = camObj.AddComponent<Camera>();
+        _cinematicCam.enabled = false;
+
+        if (gameCamera != null)
         {
-            if (!globalVolume.profile.TryGet(out _dof))
+            var gameCamData = gameCamera.GetComponent<UniversalAdditionalCameraData>();
+            if (gameCamData != null)
             {
-                // Pokud tam není, zkusíme ho přidat (jen runtime)
-                _dof = globalVolume.profile.Add<DepthOfField>(true);
+                var cinData = camObj.AddComponent<UniversalAdditionalCameraData>();
+                cinData.renderPostProcessing = gameCamData.renderPostProcessing;
+                cinData.volumeLayerMask = gameCamData.volumeLayerMask;
+                cinData.antialiasing = gameCamData.antialiasing;
             }
         }
-
-        if (gameCamera == null) gameCamera = Camera.main;
-        if (gameCamera != null)
-            _gameCamData = gameCamera.GetComponent<UniversalAdditionalCameraData>();
-
-        _moveSpeed = defaultMoveSpeed;
     }
 
     private void Update()
     {
-        // Toggle Photo Mode
-        if (Keyboard.current[toggleKey].wasPressedThisFrame)
+        if (Keyboard.current == null) return;
+
+        if (Keyboard.current[toggleKey].wasPressedThisFrame) TogglePhotoMode();
+
+        // Path Control (Dostupné i mimo PhotoCam pro spuštění během hry)
+        if (Keyboard.current[playPathKey].wasPressedThisFrame && !_isPathPlaying && _pathNodes.Count >= 2)
         {
-            TogglePhotoMode();
+            StartCoroutine(PlayCinematicPath());
         }
 
         if (!_isActive) return;
 
-        // Toggle UI
-        if (Keyboard.current[hideUIKey].wasPressedThisFrame)
-            _hideUI = !_hideUI;
+        if (Keyboard.current[hideUIKey].wasPressedThisFrame) ToggleUI();
+        if (Keyboard.current[pauseKey].wasPressedThisFrame) TogglePause();
+        if (Keyboard.current[captureKey].wasPressedThisFrame) TakeScreenshot();
 
-        // Toggle Pause
-        if (Keyboard.current[pauseKey].wasPressedThisFrame)
-            TogglePause();
+        // Node Management v režimu PhotoCam
+        if (Keyboard.current[addNodeKey].wasPressedThisFrame) AddPathNode();
+        if (Keyboard.current[clearPathKey].wasPressedThisFrame) _pathNodes.Clear();
 
         HandleMovement();
         HandleOptics();
-        HandleDoF();
-        HandleScreenshot();
     }
 
-    public void TogglePhotoMode()
+    private void AddPathNode()
+    {
+        _pathNodes.Add(new PathNode
+        {
+            position = transform.position,
+            rotation = transform.rotation,
+            fov = _photoCam.fieldOfView
+        });
+        Debug.Log($"Path Node {_pathNodes.Count} přidán.");
+    }
+
+    private IEnumerator PlayCinematicPath()
+    {
+        _isPathPlaying = true;
+        _cinematicCam.CopyFrom(gameCamera);
+        _cinematicCam.enabled = true;
+
+        if (saveFramesToDisk)
+        {
+            _currentSessionDir = $"Screenshots/Sequence_{System.DateTime.Now:yyyy-MM-dd_HH-mm-ss}";
+            Directory.CreateDirectory(_currentSessionDir);
+            _captureTexture = new RenderTexture(Screen.width, Screen.height, 24, RenderTextureFormat.ARGB32);
+            _cinematicCam.targetTexture = _captureTexture;
+        }
+
+        float timer = 0f;
+        float frameTimer = 0f;
+        float frameInterval = 1f / targetFPS;
+        int frameCount = 0;
+
+        while (timer <= pathDuration)
+        {
+            float t = timer / pathDuration;
+            UpdateCinematicTransform(t);
+
+            if (saveFramesToDisk)
+            {
+                frameTimer += Time.unscaledDeltaTime;
+                if (frameTimer >= frameInterval)
+                {
+                    CaptureFrameAsync(frameCount);
+                    frameCount++;
+                    frameTimer -= frameInterval;
+                }
+            }
+
+            timer += Time.unscaledDeltaTime;
+            yield return null;
+        }
+
+        _cinematicCam.enabled = false;
+        _cinematicCam.targetTexture = null;
+        if (_captureTexture != null) _captureTexture.Release();
+        _isPathPlaying = false;
+        Debug.Log("Záznam trasy dokončen.");
+    }
+
+    private void UpdateCinematicTransform(float t)
+    {
+        int totalSegments = _pathNodes.Count - 1;
+        float scaledT = t * totalSegments;
+        int index = Mathf.Clamp(Mathf.FloorToInt(scaledT), 0, totalSegments - 1);
+        float segmentT = scaledT - index;
+
+        PathNode p1 = _pathNodes[index];
+        PathNode p2 = _pathNodes[index + 1];
+
+        // Slerp / Lerp interpolace mezi dvěma uzly
+        _cinematicCam.transform.position = Vector3.Lerp(p1.position, p2.position, Mathf.SmoothStep(0, 1, segmentT));
+        _cinematicCam.transform.rotation = Quaternion.Slerp(p1.rotation, p2.rotation, Mathf.SmoothStep(0, 1, segmentT));
+        _cinematicCam.fieldOfView = Mathf.Lerp(p1.fov, p2.fov, Mathf.SmoothStep(0, 1, segmentT));
+    }
+
+    private void CaptureFrameAsync(int frameIndex)
+    {
+        RenderTexture activeText = RenderTexture.active;
+        RenderTexture.active = _captureTexture;
+
+        _cinematicCam.Render();
+
+        Texture2D tex = new Texture2D(_captureTexture.width, _captureTexture.height, TextureFormat.RGB24, false);
+        tex.ReadPixels(new Rect(0, 0, _captureTexture.width, _captureTexture.height), 0, 0);
+        tex.Apply();
+
+        RenderTexture.active = activeText;
+
+        byte[] bytes = tex.EncodeToJPG(85); // JPG pro menší I/O blokaci než PNG
+        Destroy(tex);
+
+        string filePath = $"{_currentSessionDir}/frame_{frameIndex:D5}.jpg";
+
+        // Zápis na pozadí pro zamezení lagu
+        Task.Run(() => File.WriteAllBytesAsync(filePath, bytes));
+    }
+
+    // --- PŮVODNÍ METODY (TogglePhotoMode, HandleMovement, atd.) ---
+
+    private void TogglePhotoMode()
     {
         _isActive = !_isActive;
 
         if (_isActive)
         {
-            // --- AKTIVACE ---
-            
-            // 1. Uložit stav hry
-            _originalTimeScale = Time.timeScale;
             _wasCursorVisible = Cursor.visible;
             _wasCursorLock = Cursor.lockState;
             _isGamePaused = true;
-            Time.timeScale = 0f;
+            ApplyTimeScale();
 
-            // 2. Zkopírovat parametry kamery (OPRAVA BAREV)
             if (gameCamera != null)
             {
-                // Transform
                 transform.position = gameCamera.transform.position;
                 transform.rotation = gameCamera.transform.rotation;
-                
-                // Camera Settings
+
                 _photoCam.fieldOfView = gameCamera.fieldOfView;
                 _photoCam.farClipPlane = gameCamera.farClipPlane;
                 _photoCam.nearClipPlane = gameCamera.nearClipPlane;
@@ -135,17 +252,16 @@ public class PhotoCam : MonoBehaviour
                 _photoCam.clearFlags = gameCamera.clearFlags;
                 _photoCam.backgroundColor = gameCamera.backgroundColor;
 
-                // URP Specifika (Post Processing, Volume Mask, Anti-aliasing)
-                if (_gameCamData != null && _photoCamData != null)
+                var gameCamData = gameCamera.GetComponent<UniversalAdditionalCameraData>();
+                if (gameCamData != null)
                 {
-                    _photoCamData.renderPostProcessing = _gameCamData.renderPostProcessing;
-                    _photoCamData.volumeLayerMask = _gameCamData.volumeLayerMask;
-                    _photoCamData.antialiasing = _gameCamData.antialiasing;
-                    _photoCamData.antialiasingQuality = _gameCamData.antialiasingQuality;
-                    _photoCamData.renderShadows = _gameCamData.renderShadows;
+                    _photoCamData.renderPostProcessing = gameCamData.renderPostProcessing;
+                    _photoCamData.volumeLayerMask = gameCamData.volumeLayerMask;
+                    _photoCamData.antialiasing = gameCamData.antialiasing;
+                    _photoCamData.antialiasingQuality = gameCamData.antialiasingQuality;
+                    _photoCamData.renderShadows = gameCamData.renderShadows;
                 }
 
-                // Inicializace pohybu
                 _targetPos = transform.position;
                 _targetRot = transform.rotation;
                 _targetFOV = _photoCam.fieldOfView;
@@ -154,50 +270,61 @@ public class PhotoCam : MonoBehaviour
                 _pitch = euler.x;
                 _roll = 0f;
 
-                // Vypnout herní kameru
                 gameCamera.gameObject.SetActive(false);
             }
 
-            // Zapnout foto kameru
             _photoCam.enabled = true;
             _photoListener.enabled = true;
-            
-            // Myš
-            Cursor.visible = true; // Chceme vidět myš pro ovládání menu
+
+            Cursor.visible = true;
             Cursor.lockState = CursorLockMode.None;
         }
         else
         {
-            // --- DEAKTIVACE ---
             if (gameCamera != null) gameCamera.gameObject.SetActive(true);
-            
+
             _photoCam.enabled = false;
             _photoListener.enabled = false;
 
-            Time.timeScale = _originalTimeScale;
+            Time.timeScale = 1f;
             Cursor.visible = _wasCursorVisible;
             Cursor.lockState = _wasCursorLock;
+
+            if (_hideUI) ToggleUI();
         }
     }
 
-    public void TogglePause()
+    private void TogglePause()
     {
         _isGamePaused = !_isGamePaused;
-        Time.timeScale = _isGamePaused ? 0f : 1f;
+        ApplyTimeScale();
+    }
+
+    private void ApplyTimeScale()
+    {
+        Time.timeScale = _isGamePaused ? 0f : _timeScaleMultiplier;
+    }
+
+    private void ToggleUI()
+    {
+        _hideUI = !_hideUI;
+        _cachedCanvases = FindObjectsByType<Canvas>(FindObjectsInactive.Include, FindObjectsSortMode.None);
+        foreach (var c in _cachedCanvases)
+        {
+            c.enabled = !_hideUI;
+        }
     }
 
     private void HandleMovement()
     {
-        // Pokud držíme pravé tlačítko myši, otáčíme se (jako v Unity Editoru)
         bool isLooking = Mouse.current.rightButton.isPressed;
-        Cursor.visible = !isLooking;
+        Cursor.visible = !isLooking && !_hideUI;
         Cursor.lockState = isLooking ? CursorLockMode.Locked : CursorLockMode.None;
 
         float dt = Time.unscaledDeltaTime;
-
-        // Pohyb
         var kb = Keyboard.current;
         float speed = _moveSpeed;
+
         if (kb.leftShiftKey.isPressed) speed *= 3f;
         if (kb.leftCtrlKey.isPressed) speed *= 0.2f;
 
@@ -215,18 +342,12 @@ public class PhotoCam : MonoBehaviour
         }
         transform.position = Vector3.Lerp(transform.position, _targetPos, 10f * dt);
 
-        // Rotace
         if (isLooking)
         {
             Vector2 delta = Mouse.current.delta.ReadValue();
             _yaw += delta.x * 0.2f;
             _pitch -= delta.y * 0.2f;
         }
-        
-        // Roll
-        if (kb.zKey.isPressed) _roll += 20f * dt;
-        if (kb.cKey.isPressed) _roll -= 20f * dt;
-        if (kb.rKey.wasPressedThisFrame) _roll = 0;
 
         _targetRot = Quaternion.Euler(_pitch, _yaw, _roll);
         transform.rotation = Quaternion.Slerp(transform.rotation, _targetRot, 10f * dt);
@@ -234,7 +355,6 @@ public class PhotoCam : MonoBehaviour
 
     private void HandleOptics()
     {
-        // Scroll mění FOV
         float scroll = Mouse.current.scroll.ReadValue().y;
         if (Mathf.Abs(scroll) > 0.01f)
         {
@@ -244,122 +364,70 @@ public class PhotoCam : MonoBehaviour
         _photoCam.fieldOfView = Mathf.Lerp(_photoCam.fieldOfView, _targetFOV, 5f * Time.unscaledDeltaTime);
     }
 
-    private void HandleDoF()
+    private void TakeScreenshot()
     {
-        if (_dof == null) return;
-        if (!_dof.active) _dof.active = true;
+        string dir = "Screenshots";
+        if (!Directory.Exists(dir)) Directory.CreateDirectory(dir);
+        string file = $"{dir}/PhotoCam_{System.DateTime.Now:yyyy-MM-dd_HH-mm-ss}.png";
 
-        // Auto Focus Logic
-        if (_autoFocus)
-        {
-            if (Physics.Raycast(transform.position, transform.forward, out RaycastHit hit, 200f))
-            {
-                _focusDist = Mathf.Lerp(_focusDist, hit.distance, 5f * Time.unscaledDeltaTime);
-            }
-        }
+        bool wasUiHidden = _hideUI;
+        if (!wasUiHidden) ToggleUI();
 
-        _dof.focusDistance.Override(_focusDist);
-        // Clona (Aperture) - nižší = rozmazanější pozadí
-        _dof.aperture.Override(_aperture); 
-    }
+        ScreenCapture.CaptureScreenshot(file, superSize);
+        Debug.Log($"Screenshot ulozen: {file}");
 
-    private void HandleScreenshot()
-    {
-        if (Keyboard.current.kKey.wasPressedThisFrame)
-        {
-            // Dočasně vypnout GUI pro screenshot
-            bool wasUiHidden = _hideUI;
-            _hideUI = true;
-
-            // Uložit
-            string dir = "Screenshots";
-            if (!Directory.Exists(dir)) Directory.CreateDirectory(dir);
-            string file = $"{dir}/Shot_{System.DateTime.Now:yyyy-MM-dd_HH-mm-ss}.png";
-            
-            // ScreenCapture bere obrazovku tak jak je (bez GUI, pokud se vykresluje v OnGUI a dáme yield, ale tady to děláme jednoduše)
-            // U OnGUI je problém, že se kreslí na konci.
-            // Pro jednoduchost: ScreenCapture zachytí i GUI, pokud ho nevypneme frame předtím.
-            // Nejlepší je zmáčknout H a pak K.
-            
-            ScreenCapture.CaptureScreenshot(file, superSize);
-            Debug.Log($"Uloženo: {file}");
-            
-            _hideUI = wasUiHidden;
-        }
+        if (!wasUiHidden) ToggleUI();
     }
 
     private void OnGUI()
     {
         if (!_isActive || _hideUI) return;
 
-        // Styl
         GUI.backgroundColor = new Color(0, 0, 0, 0.8f);
         GUI.contentColor = Color.white;
-        
-        // Okno napravo (Šířka 300px)
+
         float width = 300;
         float padding = 20;
-        Rect r = new Rect(Screen.width - width - padding, padding, width, 550);
+        Rect r = new Rect(Screen.width - width - padding, padding, width, 450);
 
         GUILayout.BeginArea(r, GUI.skin.box);
         GUILayout.BeginVertical();
 
-        GUILayout.Label("<b>PHOTO MODE SETTINGS</b>");
+        GUILayout.Label("<b>PHOTOCAM MENU</b>");
         GUILayout.Space(10);
 
-        // --- GAME CONTROL ---
-        GUILayout.Label($"Game State: {(_isGamePaused ? "<color=red>PAUSED</color>" : "<color=green>RUNNING</color>")}");
-        if (GUILayout.Button(_isGamePaused ? "RESUME GAME (P)" : "PAUSE GAME (P)"))
+        GUILayout.Label($"State: {(_isGamePaused ? "<color=red>PAUSED</color>" : "<color=green>RUNNING</color>")}");
+        if (GUILayout.Button(_isGamePaused ? "RESUME (P)" : "PAUSE (P)")) TogglePause();
+
+        GUILayout.Space(10);
+        GUILayout.Label($"Time Scale (Slowmo): {_timeScaleMultiplier:F2}x");
+        float newScale = GUILayout.HorizontalSlider(_timeScaleMultiplier, 0.01f, 3f);
+        if (Mathf.Abs(newScale - _timeScaleMultiplier) > 0.01f)
         {
-            TogglePause();
+            _timeScaleMultiplier = newScale;
+            if (!_isGamePaused) ApplyTimeScale();
         }
-        GUILayout.Label("<i>Stiskni 'H' pro skrytí tohoto menu pro nahrávání videa!</i>");
-        
+
         GUILayout.Space(15);
-        
-        // --- CAMERA ---
         GUILayout.Label($"Move Speed: {_moveSpeed:F1}");
         _moveSpeed = GUILayout.HorizontalSlider(_moveSpeed, 1f, 50f);
 
-        GUILayout.Label($"Field of View: {_targetFOV:F0}");
-        _targetFOV = GUILayout.HorizontalSlider(_targetFOV, 10f, 120f);
-
-        GUILayout.Label($"Roll (Tilt): {_roll:F0}");
-        _roll = GUILayout.HorizontalSlider(_roll, -45f, 45f);
-        if (GUILayout.Button("Reset Roll (R)")) _roll = 0;
-
         GUILayout.Space(15);
+        GUILayout.Label($"<b>CINEMATIC PATH</b> ({_pathNodes.Count} uzlů)");
+        if (GUILayout.Button("Add Node (N)")) AddPathNode();
+        if (GUILayout.Button("Clear Path (C)")) _pathNodes.Clear();
 
-        // --- DEPTH OF FIELD ---
-        GUILayout.Label("<b>DEPTH OF FIELD</b>");
-        _autoFocus = GUILayout.Toggle(_autoFocus, " Auto Focus (Center)");
-        
-        if (!_autoFocus)
-        {
-            GUILayout.Label($"Focus Distance: {_focusDist:F1}m");
-            _focusDist = GUILayout.HorizontalSlider(_focusDist, 0.1f, 100f);
-        }
-
-        GUILayout.Label($"Aperture (Blur): {_aperture:F1}");
-        // Nižší clona = více rozmazané. Slider obráceně pro intuitivnost (Vlevo = ostré, Vpravo = rozmazané)
-        _aperture = GUILayout.HorizontalSlider(_aperture, 32f, 1f); 
+        GUILayout.Label($"Duration: {pathDuration}s");
+        pathDuration = GUILayout.HorizontalSlider(pathDuration, 1f, 60f);
 
         GUILayout.Space(20);
-        
-        // --- ACTION ---
-        if (GUILayout.Button("<b>TAKE SCREENSHOT (K)</b>", GUILayout.Height(40)))
-        {
-            // Screenshot logika je v Update
-        }
-        
+        if (GUILayout.Button("<b>TAKE SCREENSHOT (K)</b>", GUILayout.Height(40))) TakeScreenshot();
+
+        GUILayout.Space(10);
+        GUILayout.Label("Play Path: M (Lze i mimo PhotoCam)");
+        GUILayout.Label("Exit: F8");
+
         GUILayout.EndVertical();
         GUILayout.EndArea();
-
-        // Crosshair (jen pokud je AutoFocus)
-        if (_autoFocus)
-        {
-            GUI.color = new Color(1, 1, 1, 0.5f);
-            GUI.Box(new Rect(Screen.width/2 - 2, Screen.height/2 - 2, 4, 4), "");
-        }
     }
 }

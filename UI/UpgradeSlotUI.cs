@@ -16,7 +16,10 @@ public class UpgradeSlotUI : MonoBehaviour
     [Header("Barvy")]
     [SerializeField] private Color _affordableColor = Color.green;
     [SerializeField] private Color _tooExpensiveColor = Color.red;
-    [SerializeField] private Color _maxedColor = Color.gray; 
+    [SerializeField] private Color _maxedColor = Color.gray;
+
+    [Header("Demo Lockdown")]
+    [SerializeField] private GameObject _lockedOverlay; // Reference na Overlay objekt
 
     private int _upgradeIndex;
     private PlayerProgression _playerProgression;
@@ -29,14 +32,27 @@ public class UpgradeSlotUI : MonoBehaviour
         _playerProgression = progression;
         _data = data;
 
-        // Statické věci (se nemění)
+        // Pokud není v demu, aktivujeme overlay a vypneme interaktivitu
+        if (!data.inDemo)
+        {
+            if (_lockedOverlay != null) _lockedOverlay.SetActive(true);
+            _buyButton.interactable = false;
+
+            // Nastavení základních textů i pro zamčený prvek
+            _nameText.text = data.UpgradeName;
+            if (data.Icon != null) _iconImage.sprite = data.Icon;
+            return;
+        }
+
+        // Standardní inicializace pro dostupné upgrady
+        if (_lockedOverlay != null) _lockedOverlay.SetActive(false);
+
         _nameText.text = data.UpgradeName;
         if (data.Icon != null) _iconImage.sprite = data.Icon;
 
-        // Kliknutí na tlačítko
         _buyButton.onClick.RemoveAllListeners();
-        _buyButton.onClick.AddListener(() => {
-            Debug.Log($"[UpgradeSlot] KLIKNUTO NA: {data.UpgradeName}");
+        _buyButton.onClick.AddListener(() =>
+        {
             OnBuyClicked();
         });
 
@@ -45,7 +61,7 @@ public class UpgradeSlotUI : MonoBehaviour
 
     public void Refresh()
     {
-        if (_playerProgression == null || _data == null) return;
+        if (_playerProgression == null || _data == null || !_data.inDemo) return;
 
         // 1. Získání dat
         int currentLevel = _playerProgression.GetUpgradeLevel(_upgradeIndex);
@@ -66,7 +82,7 @@ public class UpgradeSlotUI : MonoBehaviour
             _costText.text = "---";
             _costText.color = _maxedColor;
             _buyButton.interactable = false;
-            
+
             // Volitelně: změnit pozadí tlačítka na šedou
             if (_buttonBackground != null) _buttonBackground.color = Color.gray;
         }
@@ -75,12 +91,12 @@ public class UpgradeSlotUI : MonoBehaviour
             // STAV: LZE UPGRADOVAT
             int currentCost = _data.GetCost(currentLevel);
             _costText.text = $"{currentCost} XP";
-            
+
             bool canAfford = playerXP >= currentCost;
-            
+
             // Tlačítko je aktivní jen pokud máme dost XP
             _buyButton.interactable = canAfford;
-            
+
             // Barva textu podle ceny
             _costText.color = canAfford ? _affordableColor : _tooExpensiveColor;
 

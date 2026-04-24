@@ -4,6 +4,7 @@ using Unity.Netcode;
 using Unity.Cinemachine;
 using System.Collections;
 using Unity.Netcode.Components;
+using System;
 
 [RequireComponent(typeof(StatusEffectReceiver))]
 [RequireComponent(typeof(CharacterController))]
@@ -128,12 +129,23 @@ public class PlayerController : NetworkBehaviour
     private bool _lastSentGrounded = true;
     // NOVÉ: Proměnná pro zamknutí ovládání (Shop, Cutscény, atd.)
     private bool _inputLocked = false;
-
+    private bool _isStaminaEmptyPlayed = false;
 
     [Header("Slam Passive")]
     [SerializeField] private GameObject _slamVfxPrefab; // Vizuál výbuchu (např. prach/kameny)
     [SerializeField] private float _minFallDistanceForSlam = 2.0f; // Jak z výšky musí spadnout, aby to bouchlo
     private float _highestYDuringJump;
+
+    [Header("Footsteps")]
+    [Tooltip("Vzdálenost, kterou musí hráč ujít pro přehrání kroku (doporučuji 1.5 až 2.0)")]
+    [SerializeField] private float _stepDistance = 22.0f;
+    private float _accumulatedDistance = 0f;
+    private Vector3 _lastPosition;
+
+    // Události pohybu
+    public static event Action OnLocalPlayerMoved;
+    public static event Action OnLocalPlayerAttacked;
+    public static event Action OnLocalPlayerDodged;
 
     private void Awake()
     {
@@ -163,6 +175,7 @@ public class PlayerController : NetworkBehaviour
 
         _originalHeight = _controller.height;
         _originalCenter = _controller.center;
+        _lastPosition = transform.position;
     }
 
     public override void OnDestroy()
@@ -186,6 +199,11 @@ public class PlayerController : NetworkBehaviour
     {
         if (!IsOwner) return;
         _moveInput = context.ReadValue<Vector2>();
+
+        if (_moveInput.magnitude > 0.1f)
+        {
+            OnLocalPlayerMoved?.Invoke();
+        }
     }
 
     public void OnLook(InputAction.CallbackContext context)
@@ -198,6 +216,7 @@ public class PlayerController : NetworkBehaviour
     {
         if (!IsOwner) return;
         _isFireInputHeld = context.ReadValue<float>() > 0.5f;
+        OnLocalPlayerAttacked?.Invoke();
     }
 
     // NOVÁ METODA PRO SPRINT
@@ -228,6 +247,7 @@ public class PlayerController : NetworkBehaviour
 
         if (_attributes.ConsumeStamina(_dodgeStaminaCost))
         {
+            OnLocalPlayerDodged?.Invoke();
             // 1. Logika směru
             Vector2 dodgeInput = _moveInput;
             if (dodgeInput.magnitude < 0.1f) dodgeInput = new Vector2(0, -1);
@@ -369,7 +389,7 @@ public class PlayerController : NetworkBehaviour
 
         // 5. Zkombinujeme oba vektory a zavoláme Move() POUZE JEDNOU
         _controller.Move(horizontalMove + verticalMove);
-
+        HandleFootsteps();
         // Logika pro automatickou střelbu při držení
         if (_isFireInputHeld)
         {
@@ -453,12 +473,10 @@ public class PlayerController : NetworkBehaviour
 
         // --- 1. METEOR SLAM (VÝBUCH PŘI DOPADU) ---
         float fallDistance = _highestYDuringJump - transform.position.y;
-        
-        if (fallDistance >= _minFallDistanceForSlam)
+
+        if (_progression.HasUpgrade(StatType.SlamDamage) && fallDistance >= _minFallDistanceForSlam)
         {
-            // TADY NAPOJÍŠ SVŮJ UPGRADE SYSTÉM (Pro teď je tu natvrdo 10f pro test)
-            // Např: float slamDamage = _progression.GetStatBonus(StatType.SlamDamage);
-            float slamDamage = 10f; 
+            float slamDamage = 10f;
 
             if (slamDamage > 0)
             {
@@ -471,7 +489,7 @@ public class PlayerController : NetworkBehaviour
 
         // --- 2. BĚŽNÉ EFEKTY DOPADU ---
         GetComponentInChildren<PlayerSquashStretch>()?.TriggerLandSquash();
-        
+
         // Spustíme VFX (prach)
         if (_playerVFX != null)
         {
@@ -670,37 +688,42 @@ public class PlayerController : NetworkBehaviour
     /// </summary>
     private void HandleSprintStamina()
     {
-        // Chceme sprintovat? (držíme klávesu)
         if (_isSprinting)
         {
-            // Sprintujeme pouze, pokud se hýbeme dopředu
             bool isMovingForward = _moveInput.magnitude > 0.1f;
-
-            // Získáme lokální instanci atributů (měla by být naše)
             if (_attributes == null) _attributes = PlayerAttributes.LocalInstance;
             if (_attributes == null)
             {
-                _isSprinting = false; // Nemáme atributy, nemůžeme sprintovat
+                _isSprinting = false;
                 return;
             }
 
-            // Máme dostatek staminy A hýbeme se dopředu?
-            if (isMovingForward && _attributes.ConsumeStamina(_sprintStaminaCost * Time.deltaTime))
+            if (_attributes.CurrentStamina.Value > 0 && isMovingForward)
             {
-                // Úspěch - sprintujeme
                 _isSprinting = true;
+                _isStaminaEmptyPlayed = false; // Reset flagu při úspěšném sprintu
+                _attributes.ConsumeStamina(_sprintStaminaCost * Time.deltaTime);
             }
             else
             {
-                // Ne, došla stamina nebo stojíme/couváme -> vypneme sprint
                 _isSprinting = false;
+
+                // Pokud došla stamina BĚHEM snahy o sprint a ještě jsme to nezahráli
+                if (_attributes.CurrentStamina.Value <= 0 && !_isStaminaEmptyPlayed && isMovingForward)
+                {
+                    _isStaminaEmptyPlayed = true;
+                    if (_playerAudio != null)
+                    {
+                        _playerAudio.RequestPlaySoundServerRpc(PlayerAudio.AUDIO_OUT_OF_STAMINA);
+                    }
+                }
             }
-
-            _lastSprintTime = Time.time;
         }
-
-        // Pokud klávesu nedržíme, _isSprinting je už false z OnSprint()
-        // a stamina se přirozeně regeneruje (díky PlayerAttributes.cs)
+        else
+        {
+            // Reset flagu, pokud hráč pustí tlačítko sprintu
+            _isStaminaEmptyPlayed = false;
+        }
     }
 
 
@@ -778,9 +801,9 @@ public class PlayerController : NetworkBehaviour
             {
                 // Pokusil se skočit, ale nemá staminu
                 _playerAudio.RequestPlaySoundServerRpc(PlayerAudio.AUDIO_OUT_OF_STAMINA);
-                
+
                 // Vynulujeme buffer i zde, aby zvuk přehrál jen jednou na stisk a ne spamoval
-                _lastJumpInputTime = 0f; 
+                _lastJumpInputTime = 0f;
             }
         }
     }
@@ -932,6 +955,45 @@ public class PlayerController : NetworkBehaviour
         }
     }
 
+    /// <summary>
+    /// UPRAVENO: Přidáno počítání vzdálenosti pro krokové zvuky, které se spouští podle toho, jak daleko hráč ušel, ne podle animace.
+    /// </summary>
+    private void HandleFootsteps()
+    {
+        Vector3 currentPosFlat = new Vector3(transform.position.x, 0, transform.position.z);
+        Vector3 lastPosFlat = new Vector3(_lastPosition.x, 0, _lastPosition.z);
+        float distanceMovedThisFrame = Vector3.Distance(currentPosFlat, lastPosFlat);
+
+        _lastPosition = transform.position;
+
+        if (!_isGrounded)
+        {
+            _accumulatedDistance = 0f;
+            return;
+        }
+
+        if (_moveInput.magnitude > 0.1f)
+        {
+            _accumulatedDistance += distanceMovedThisFrame;
+
+            float safeStepDistance = _stepDistance > 0.1f ? _stepDistance : 2.0f;
+
+            if (_accumulatedDistance >= safeStepDistance)
+            {
+                if (_playerAudio != null)
+                {
+                    _playerAudio.RequestPlaySoundServerRpc(PlayerAudio.AUDIO_FOOTSTEP);
+                }
+
+                _accumulatedDistance = 0f;
+            }
+        }
+        else
+        {
+            _accumulatedDistance = 0f;
+        }
+    }
+
     private void TriggerDodgeAnimation(Vector2 normalizedDodgeInput)
     {
         // Určíme dominantní směr pro animaci
@@ -1080,7 +1142,7 @@ public class PlayerController : NetworkBehaviour
         }
     }
 
-    
+
 
     [ServerRpc]
     private void ExecuteSlamExplosionServerRpc(float fallDistance, float baseSlamDamage)

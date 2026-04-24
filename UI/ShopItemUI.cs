@@ -19,9 +19,9 @@ public class ShopItemUI : MonoBehaviour, IPointerEnterHandler, IPointerExitHandl
     private Action _onHoverExit;                // Callback pro skrytí
     private int _index;
 
-    public void Setup(ShopItemData item, int index, int playerGold, 
-                      Action<int, ShopItemData> onBuy, 
-                      Action<ShopItemData> onHover, 
+    public void Setup(ShopItemData item, int index, int playerGold,
+                      Action<int, ShopItemData> onBuy,
+                      Action<ShopItemData> onHover,
                       Action onHoverExit)
     {
         _data = item;
@@ -58,18 +58,18 @@ public class ShopItemUI : MonoBehaviour, IPointerEnterHandler, IPointerExitHandl
 
         _buyButton.onClick.RemoveAllListeners();
         _buyButton.onClick.AddListener(() => _onBuyClick(_index, _data));
-        
+
         gameObject.SetActive(true);
     }
 
     // Unity Event System metody
     public void OnPointerEnter(PointerEventData eventData)
     {
-        _onHoverEnter?.Invoke(_data);
+        ShopTooltipUI.Instance.Show(_data);
     }
 
     public void OnPointerExit(PointerEventData eventData)
     {
-        _onHoverExit?.Invoke();
+        ShopTooltipUI.Instance.Hide();
     }
 }

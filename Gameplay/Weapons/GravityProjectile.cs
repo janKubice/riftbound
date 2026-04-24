@@ -15,11 +15,10 @@ public class GravityProjectile : SmartProjectile
     [SerializeField] private float _rotationSpeed = 360f;
 
     // Přepíšeme Initialize pro úpravu fyziky při spawnu
-    public override void Initialize(NetworkObject attacker, Vector3 direction, WeaponStats stats, List<HitEffect> payload = null)
+    public override void Initialize(NetworkObject attacker, Vector3 direction, WeaponStats stats, List<HitEffect> payload = null, HashSet<GameObject> passedHitHistory = null)
     {
         // 1. Provedeme základní nastavení (ID útočníka, staty, payload)
-        base.Initialize(attacker, direction, stats, payload);
-
+        base.Initialize(attacker, direction, stats, payload, passedHitHistory);
         // 2. Přepíšeme chování Rigidbody
         if (_rb != null)
         {

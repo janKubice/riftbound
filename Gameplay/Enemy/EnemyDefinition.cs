@@ -6,10 +6,6 @@ public class EnemyDefinition : ScriptableObject
     public string Name;
     public GameObject Prefab;
     
-    [Header("Spawning Rules")]
-    public EnemyRarity Rarity;
-    public int Cost;
-    
     [Header("Base Stats")]
     public int BaseHealth = 100;
     public int BaseDamage = 10;

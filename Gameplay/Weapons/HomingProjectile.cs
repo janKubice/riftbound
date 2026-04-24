@@ -12,18 +12,19 @@ public class HomingProjectile : SmartProjectile
     private Collider _targetCollider; 
     private float _timeAlive;
 
-    // Unity volá Update automaticky
+    // Statický buffer sdílený všemi projektily (drastická úspora paměti pro Survivor-like)
+    private static readonly Collider[] _hitBuffer = new Collider[50];
+
     private void Update()
     {
         if (!IsServer) return;
 
         _timeAlive += Time.deltaTime;
         
-        // Fáze 1: Čekání
         if (_timeAlive < _homingDelay) return;
 
-        // Fáze 2: Hledání cíle (pokud ho nemáme nebo byl zničen)
-        if (_targetCollider == null)
+        // Pokud cíl umřel nebo zmizel, najdeme nový
+        if (_targetCollider == null || !_targetCollider.gameObject.activeInHierarchy)
         {
             FindClosestTarget();
         }
@@ -33,7 +34,6 @@ public class HomingProjectile : SmartProjectile
     {
         if (!IsServer) return;
 
-        // Pokud máme cíl, zatáčíme
         if (_targetCollider != null && _rb != null)
         {
             RotateVelocityTowardsTarget();
@@ -42,17 +42,25 @@ public class HomingProjectile : SmartProjectile
 
     private void FindClosestTarget()
     {
-        Collider[] hits = Physics.OverlapSphere(transform.position, _searchRadius, _targetLayer);
+        // NonAlloc varianta - nevytváří garbage
+        int hitCount = Physics.OverlapSphereNonAlloc(transform.position, _searchRadius, _hitBuffer, _targetLayer);
+        
         float closestDist = Mathf.Infinity;
         Collider bestTarget = null;
 
-        foreach (var hit in hits)
+        for (int i = 0; i < hitCount; i++)
         {
-            // Ignorujeme sami sebe (Owner)
+            Collider hit = _hitBuffer[i];
+
+            // 1. Ignorovat cíle, které už tento projektil zasáhl (např. ten, od kterého se odrazil)
+            if (_hitHistory.Contains(hit.gameObject)) continue;
+
+            // 2. OPRAVA: Ignorovat samotného střelce podle unikátního NetworkObjectId
             var netObj = hit.GetComponentInParent<NetworkObject>();
             if (netObj != null && netObj.NetworkObjectId == _attackerObjectId) continue;
 
-            float dist = Vector3.Distance(transform.position, hit.transform.position);
+            float dist = Vector3.SqrMagnitude(transform.position - hit.transform.position); 
+            
             if (dist < closestDist)
             {
                 closestDist = dist;
@@ -61,18 +69,15 @@ public class HomingProjectile : SmartProjectile
         }
 
         _targetCollider = bestTarget;
+        
+        System.Array.Clear(_hitBuffer, 0, hitCount);
     }
 
     private void RotateVelocityTowardsTarget()
     {
-        // --- OPRAVA ZDE ---
-        // Místo .transform.position (nohy) bereme .bounds.center (střed těla/hrudník)
         Vector3 targetCenter = _targetCollider.bounds.center;
-        
         Vector3 directionToTarget = (targetCenter - transform.position).normalized;
-        // ------------------
-
-        Vector3 currentVelocity = _rb.linearVelocity; // Unity 6 (nebo .velocity)
+        Vector3 currentVelocity = _rb.linearVelocity;
         
         if (currentVelocity == Vector3.zero) return;
 

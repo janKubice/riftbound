@@ -30,6 +30,10 @@ public class EnemyHealth : NetworkBehaviour
     private NetworkedAudioSource _netAudio;
     private ulong _lastAttackerId = 9999;
 
+    [Header("VFX")]
+    [Tooltip("Prefab částicového efektu (Particle System) přehráný při smrti.")]
+    [SerializeField] private GameObject _deathVFXPrefab;
+
     [Header("Gore System")]
     [Tooltip("Seznam prefabů kousků těla (hlava, ruka, kosti). Každý prefab musí mít Rigidbody a Collider.")]
     [SerializeField] private List<GameObject> _gorePrefabs = new List<GameObject>();
@@ -38,6 +42,9 @@ public class EnemyHealth : NetworkBehaviour
     private float _explosionForce;
     private float _explosionRadius;
     private bool _isDead = false;
+
+    public int MaxHealth => _baseMaxHealth > 0 ? _baseMaxHealth : _maxHealth;
+    public bool IsInjured => CurrentHealth.Value < MaxHealth;
 
     private void Awake()
     {
@@ -122,7 +129,18 @@ public class EnemyHealth : NetworkBehaviour
 
         if (!_isTrainingDummy && CurrentHealth.Value <= 0) return;
 
-        CurrentHealth.Value -= amount;
+        int finalDamage = amount;
+        // Pokud útočník je hráč, aplikujeme jeho bonusy na serveru
+        if (NetworkManager.Singleton.ConnectedClients.TryGetValue(attackerId, out var client))
+        {
+            var playerProg = client.PlayerObject.GetComponent<PlayerProgression>();
+            if (playerProg != null)
+            {
+                finalDamage = (int)(amount * playerProg.GetStatMultiplier(StatType.DamageMultiplier));
+            }
+        }
+
+        CurrentHealth.Value -= finalDamage;
         _lastAttackerId = attackerId;
 
         if (attackerId != 9999 && SteamStatsManager.Instance != null && SteamStatsManager.Instance.IsSpawned) // PŘIDÁNO IsSpawned
@@ -270,25 +288,51 @@ public class EnemyHealth : NetworkBehaviour
         {
             int dropRolls = 1;
             float chanceMultiplier = 1.0f;
+            float fortuneBonus = 0f;
+            float expMultiplier = 1f;
+            float tierAmountMultiplier = 1f; // Přidáno pro škálování hodnoty lootu
+
+            // Získání Fortune bonusu z PlayerProgression útočníka
+            if (NetworkManager.Singleton.ConnectedClients.TryGetValue(_lastAttackerId, out var client))
+            {
+                var playerProg = client.PlayerObject.GetComponent<PlayerProgression>();
+                if (playerProg != null)
+                {
+                    fortuneBonus = playerProg.GetStatBonus(StatType.Luck);
+                    expMultiplier = 1 + playerProg.GetStatBonus(StatType.ExperienceGain);
+                }
+            }
 
             switch (_currentTier)
             {
-                case EnemyTier.Normal: dropRolls = 1; chanceMultiplier = 1.0f; break;
-                case EnemyTier.Elite: dropRolls = 2; chanceMultiplier = 1.2f; break;
-                case EnemyTier.Champion: dropRolls = 3; chanceMultiplier = 1.5f; break;
-                case EnemyTier.Boss: dropRolls = 5; chanceMultiplier = 10.0f; break;
+                case EnemyTier.Normal:
+                    dropRolls = 1; chanceMultiplier = 1.0f; tierAmountMultiplier = 1.0f; break;
+                case EnemyTier.Elite:
+                    dropRolls = 2; chanceMultiplier = 1.2f; tierAmountMultiplier = 2.0f; break;
+                case EnemyTier.Champion:
+                    dropRolls = 3; chanceMultiplier = 1.5f; tierAmountMultiplier = 3.0f; break;
+                case EnemyTier.Boss:
+                    dropRolls = 5; chanceMultiplier = 10.0f; tierAmountMultiplier = 5.0f; break;
             }
 
-            for (int i = 0; i < dropRolls; i++)
+            float finalChance = (_lootChance * chanceMultiplier) + fortuneBonus;
+            int finalRolls = dropRolls + (int)(fortuneBonus * 2);
+
+            // Výpočet finálního násobiče (hráčský bonus * tier bonus)
+            float finalAmountMultiplier = expMultiplier * tierAmountMultiplier;
+
+            for (int i = 0; i < finalRolls; i++)
             {
-                if (UnityEngine.Random.value < _lootChance * chanceMultiplier)
+                if (UnityEngine.Random.value < finalChance)
                 {
                     Vector3 randomOffset = new Vector3(
                         UnityEngine.Random.Range(-0.5f, 0.5f),
                         0.5f,
                         UnityEngine.Random.Range(-0.5f, 0.5f)
                     );
-                    LootManager.Instance.SpawnLoot(transform.position + randomOffset, _lootTable);
+
+                    // Použití finalAmountMultiplier
+                    LootManager.Instance.SpawnLoot(transform.position + randomOffset, _lootTable, finalAmountMultiplier);
                 }
             }
         }
@@ -300,7 +344,7 @@ public class EnemyHealth : NetworkBehaviour
             col.enabled = false;
         }
 
-        DestroySelf(); // Volání úklidu
+        DestroySelf();
     }
 
     public void ApplyKnockback(Vector3 force)
@@ -334,6 +378,15 @@ public class EnemyHealth : NetworkBehaviour
     {
         // Pokud nemáme nastavené žádné části, ignorujeme
         if (_gorePrefabs == null || _gorePrefabs.Count == 0) return;
+
+        if (_deathVFXPrefab != null)
+        {
+            // Instanciace lokálního ne-síťového objektu
+            GameObject vfx = Instantiate(_deathVFXPrefab, pos, Quaternion.identity);
+
+            // Pojistka pro smazání objektu, pokud particle system nemá nastaveno "Stop Action: Destroy"
+            Destroy(vfx, 5f);
+        }
 
         // Náhodně určíme, kolik kusů (1 až VŠECHNY) z nepřítele vypadne
         int countToSpawn = UnityEngine.Random.Range(1, _gorePrefabs.Count + 1);

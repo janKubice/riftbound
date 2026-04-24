@@ -1,5 +1,6 @@
 using UnityEngine;
-using UnityEngine.EventSystems; // Nutné pro detekci UI událostí
+using UnityEngine.EventSystems;
+using UnityEngine.UI; // Nutné pro detekci UI událostí
 
 public class UISoundElement : MonoBehaviour, IPointerClickHandler, IPointerEnterHandler
 {
@@ -14,10 +15,26 @@ public class UISoundElement : MonoBehaviour, IPointerClickHandler, IPointerEnter
     [SerializeField] private bool _enableHover = true;
     [SerializeField] private bool _enableClick = true;
 
+    private Button _button;
+
+    private void Awake()
+    {
+        _button = GetComponent<Button>();
+        if (_button == null)
+        {
+            Debug.LogWarning("UISoundElement je připojen k objektu bez Button komponenty. Zvuky nebudou fungovat.");
+        }
+    }
+
+    private bool IsInteractable()
+    {
+        return _button == null || _button.interactable;
+    }
+
     // Voláno automaticky při kliknutí na objekt
     public void OnPointerClick(PointerEventData eventData)
     {
-        if (!_enableClick) return;
+        if (!_enableClick || !IsInteractable()) return;
         
         if (UIAudioManager.Instance != null)
         {
@@ -28,7 +45,7 @@ public class UISoundElement : MonoBehaviour, IPointerClickHandler, IPointerEnter
     // Voláno automaticky při najetí myší
     public void OnPointerEnter(PointerEventData eventData)
     {
-        if (!_enableHover) return;
+        if (!_enableHover || !IsInteractable()) return;
 
         if (UIAudioManager.Instance != null)
         {

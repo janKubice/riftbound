@@ -32,4 +32,18 @@ public class LootTable : ScriptableObject
         }
         return false;
     }
+    
+    public bool TryGetLootModified(float amountMultiplier, out LootEntry result, out int amount)
+    {
+        bool success = TryGetLoot(out result, out amount);
+        if (success)
+        {
+            // Vynásobíme množství modifikátorem (např. 1.3f pro +30 %)
+            amount = Mathf.RoundToInt(amount * amountMultiplier);
+
+            // Zajištění, aby i při malém multiplikátoru vypadl aspoň 1 kus, pokud byl úspěšný roll
+            if (amount <= 0) amount = 1;
+        }
+        return success;
+    }
 }

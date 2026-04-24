@@ -56,7 +56,7 @@ public class MainMenuUI : MonoBehaviour
         Cursor.visible = true;
 
         ShowPanel(_mainPanel);
-        
+
         SteamManager.OnLobbyListUpdated += HandleLobbyListUpdated;
         SteamManager.OnConnectionFailed += HandleConnectionFailed;
 
@@ -86,9 +86,9 @@ public class MainMenuUI : MonoBehaviour
     {
         textComp.text = message;
         textComp.gameObject.SetActive(true);
-        
+
         yield return new WaitForSeconds(_errorDisplayTime);
-        
+
         textComp.text = "";
         textComp.gameObject.SetActive(false);
     }
@@ -120,6 +120,16 @@ public class MainMenuUI : MonoBehaviour
         ClearAllErrors();
         ShowPanel(_browserPanel);
         SteamManager.Instance.RequestLobbyList();
+    }
+
+    /// <summary>
+    /// Tato metoda se volá, když hráč klikne na "Play Arena Solo". Spustí Host-Only relaci pro Arénu.
+    /// </summary>
+    public void OnPlayArenaSoloClicked()
+    {
+        ClearAllErrors();
+        // Spustí Host-Only relaci. "ArenaScene" musí přesně odpovídat názvu tvé scény.
+        SteamManager.Instance.HostArenaSolo();
     }
 
     public void GoBack() => ShowPanel(_mainPanel);

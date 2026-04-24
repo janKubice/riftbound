@@ -1,4 +1,5 @@
 using System.Text;
+using Unity.VisualScripting;
 using UnityEngine;
 
 [CreateAssetMenu(fileName = "WeaponData", menuName = "Items/Weapon Data")]
@@ -40,7 +41,11 @@ public class WeaponData : ScriptableObject
 
     [Tooltip("Pokud je true, WeaponManager bude řešit vizuál jako kontinuální paprsek.")]
     public bool IsContinuous = false;
+    public bool IsLaserWeapon = false; // Pro rychlou kontrolu v kódu, nastaví se při inicializaci vizuálů
 
+    [Header("Demo Content")]
+    [Tooltip("Pokud je true, zbraň bude v demu dostupná. Pokud false, bude v obchodě zamčená.")]
+    public bool InDemo = false;
 
     public string GetRichTextStats()
     {
@@ -61,7 +66,7 @@ public class WeaponData : ScriptableObject
         if (IsRanged && BaseStats.ProjectileCount > 1)
             sb.AppendLine($"Projectiles: <color=#FFFF44>{BaseStats.ProjectileCount}</color>");
 
-        if (BaseStats.Effect.Type != StatusEffectType.None)
+        if (BaseStats.Effect != null && BaseStats.Effect.Type != StatusEffectType.None)
             sb.AppendLine($"Effect: <color=#FF00FF>{BaseStats.Effect.Type}</color>");
 
         // Lore popis

@@ -13,7 +13,7 @@ public class PlayerAudio : NetworkBehaviour
     [SerializeField] private AudioSource _audioSource;
 
     // Seznam pro snadný přístup přes index
-    private List<AudioClip> _audioClipList;
+    private List<AudioClipsSettings> _audioClipList;
 
     private void Awake()
     {
@@ -51,13 +51,13 @@ public class PlayerAudio : NetworkBehaviour
         {
             Debug.LogError($"[PlayerAudio] CHYBA: V Inspectoru chybí přiřazený '_audioData'! Objekt: {gameObject.name}");
             // Inicializujeme prázdný list, aby zbytek kódu nepadal na NullReference
-            _audioClipList = new List<AudioClip>();
+            _audioClipList = new List<AudioClipsSettings>();
             return;
         }
 
         // POZOR: Pořadí v tomto seznamu MUSÍ být konzistentní!
         // Pokud přidáte nový zvuk, přidejte ho na konec seznamu.
-        _audioClipList = new List<AudioClip>
+        _audioClipList = new List<AudioClipsSettings>
         {
             _audioData.Jump,         // Index 0
             _audioData.Land,         // Index 1
@@ -67,7 +67,9 @@ public class PlayerAudio : NetworkBehaviour
             _audioData.HitReceived,  // Index 5
             _audioData.HitDealt,     // Index 6
             _audioData.OutOfStamina, // Index 7
-            _audioData.ItemPickup    // Index 8
+            _audioData.ItemPickup,
+            _audioData.HealthCritical, // Index 9
+            _audioData.ManaCritical
         };
     }
 
@@ -99,16 +101,17 @@ public class PlayerAudio : NetworkBehaviour
     [ClientRpc]
     private void PlaySoundClientRpc(int clipIndex)
     {
-        // Tento kód běží na VŠECH klientech
-        // (InitializeAudioList() v Awake() zajistila, že _audioClipList existuje)
-        AudioClip clipToPlay = _audioClipList[clipIndex];
+        if (clipIndex < 0 || clipIndex >= _audioClipList.Count) return;
 
-        if (clipToPlay != null)
+        AudioClipsSettings settings = _audioClipList[clipIndex];
+
+        if (settings.Clip != null)
         {
-            // PlayOneShot přehraje zvuk jednou a nepřeruší zvuk, který už hraje
-            _audioSource.PlayOneShot(clipToPlay);
+            // volumeScale vynásobí aktuální hlasitost AudioSource hlasitostí klipu
+            _audioSource.PlayOneShot(settings.Clip, settings.Volume);
         }
     }
+    
 
     // --- Pomocné konstanty (pro lepší čitelnost v jiných skriptech) ---
     // Můžeme je použít místo "magických čísel" (0, 1, 2...)
@@ -121,4 +124,6 @@ public class PlayerAudio : NetworkBehaviour
     public const int AUDIO_HIT_DEALT = 6;
     public const int AUDIO_OUT_OF_STAMINA = 7;
     public const int AUDIO_ITEM_PICKUP = 8;
+    public const int AUDIO_HEALTH_CRITICAL = 9; 
+    public const int AUDIO_MANA_CRITICAL = 10;
 }

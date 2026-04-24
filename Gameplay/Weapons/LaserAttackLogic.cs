@@ -1,5 +1,6 @@
 using UnityEngine;
 using Unity.Netcode;
+using System.Collections.Generic;
 
 [CreateAssetMenu(fileName = "LaserAttack", menuName = "Attacks/Laser Logic")]
 public class LaserAttackLogic : AttackLogic
@@ -41,7 +42,7 @@ public class LaserAttackLogic : AttackLogic
 
         for (int i = 0; i < count; i++)
         {
-            float currentAngle = startAngle + (angleStep * i);
+            float currentAngle = count > 1 ? startAngle + (angleStep * i) : 0f;
 
             // Aplikujeme lokální rotaci na naši base rotaci
             Quaternion spreadRot = Quaternion.Euler(0, currentAngle, 0);
@@ -56,33 +57,45 @@ public class LaserAttackLogic : AttackLogic
             {
                 if (hit.collider.gameObject == attacker.gameObject) continue;
 
-                // A) Damage
+                // A) Damage (Pouze pokud to má zdraví)
                 if (hit.collider.TryGetComponent(out EnemyHealth enemy) || (enemy = hit.collider.GetComponentInParent<EnemyHealth>()))
                 {
                     enemy.TakeDamage(stats.Damage, attacker.OwnerClientId);
                     if (stats.Effect != null && stats.Effect.Type != StatusEffectType.None) enemy.ApplyStatusEffect(stats.Effect);
-
-                    // SPUŠTĚNÍ EFEKTŮ (Ricochet atd.)
-                    ExecutePayload(hit.collider.gameObject, hit.point, attacker, weaponManager, stats);
                 }
                 else if (hit.collider.TryGetComponent(out PlayerAttributes p))
                 {
-                    p.TakeDamageServerRpc(stats.Damage);
-                    ExecutePayload(hit.collider.gameObject, hit.point, attacker, weaponManager, stats);
+                    p.TakeDamageServerRpc(stats.Damage, attacker.OwnerClientId);
                 }
 
+                // B) ---> SPUŠTĚNÍ EFEKTŮ NA VŠEM (Nepřítel i Zeď/Zem) <---
+                ExecutePayload(hit.collider.gameObject, hit.point, attacker, weaponManager, stats);
+
                 weaponManager.SpawnMeleeImpact(hit.point);
-                break; // Laser končí na první překážce
+                break; // Laser končí na první překážce (ať už je to goblin nebo stěna)
             }
         }
     }
 
     private void ExecutePayload(GameObject target, Vector3 hitPos, NetworkObject attacker, WeaponManager manager, WeaponStats stats)
     {
-        if (stats.OnHitEffects == null) return;
-        foreach (var effect in stats.OnHitEffects)
+        // KASKÁDOVÁNÍ: Pokud nemáme efekty, končíme
+        if (stats.OnHitEffects == null || stats.OnHitEffects.Count == 0) return;
+
+        // 1. Vezmeme POUZE PRVNÍ efekt na řadě
+        HitEffect activeEffect = stats.OnHitEffects[0];
+
+        // 2. Vytvoříme zbytek fronty (vše kromě prvního efektu)
+        List<HitEffect> remainingPayload = new List<HitEffect>();
+        for (int i = 1; i < stats.OnHitEffects.Count; i++)
         {
-            if (effect != null) effect.OnHit(hitPos, target, attacker, manager);
+            remainingPayload.Add(stats.OnHitEffects[i]);
+        }
+
+        // 3. Spustíme aktivní efekt a předáme mu zbytek batohu
+        if (activeEffect != null)
+        {
+            activeEffect.OnHit(hitPos, target, attacker, manager, remainingPayload);
         }
     }
 }

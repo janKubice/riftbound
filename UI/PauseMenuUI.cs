@@ -5,6 +5,7 @@ using Unity.Netcode;
 using RogueDeckCoop.Networking;
 using System.Collections.Generic;
 using UnityEngine.InputSystem;
+using UnityEngine.SceneManagement;
 
 public class PauseMenuUI : MonoBehaviour
 {
@@ -105,15 +106,29 @@ public class PauseMenuUI : MonoBehaviour
         _buttonsPanel.SetActive(false);
         _confirmationPanel.SetActive(true);
 
+        // Check if the host is alone in the lobby
+        bool isAlone = NetworkManager.Singleton.ConnectedClientsIds.Count <= 1;
+
         if (_isHost)
         {
-            _confirmationText.text = "Jsi HOST. Ukončením hry vykopneš všechny hráče.\nOpravdu ukončit?";
             _confirmYesButton.onClick.RemoveAllListeners();
             _confirmYesButton.onClick.AddListener(ConfirmExitAsHost);
+
+            if (isAlone)
+            {
+                // Host is alone
+                _confirmationText.text = "Are you sure you want to quit the game?";
+            }
+            else
+            {
+                // Host has peers
+                _confirmationText.text = "You are the HOST. Quitting will disconnect all other players.\nDo you really want to exit?";
+            }
         }
         else
         {
-            _confirmationText.text = "Opravdu chceš opustit hru?\nTvůj postup bude uložen.";
+            // Client
+            _confirmationText.text = "Are you sure you want to leave the game?\nYour progress will be saved.";
             _confirmYesButton.onClick.RemoveAllListeners();
             _confirmYesButton.onClick.AddListener(ConfirmExitAsClient);
         }
@@ -126,22 +141,38 @@ public class PauseMenuUI : MonoBehaviour
 
     private void ConfirmExitAsClient()
     {
-        // 1. Uložit postavu (lokálně nebo request na server)
         if (PlayerAttributes.LocalInstance != null)
         {
             PlayerAttributes.LocalInstance.SavePlayerData();
         }
 
-        // 2. Opustit lobby a síť
-        GameManager.Instance.SetPlayerInMenuServerRpc(false); // Aby se hra odpauzla po mém odchodu
+        // Kontrola IsSpawned před voláním RPC
+        if (GameManager.Instance != null && GameManager.Instance.IsSpawned)
+        {
+            GameManager.Instance.SetPlayerInMenuServerRpc(false);
+        }
+
         SteamManager.Instance.LeaveLobby();
         AppManager.Instance.GoToMainMenu();
     }
 
     private void ConfirmExitAsHost()
     {
-        // Host ukončuje celou session
-        GameManager.Instance.RequestEndGameServerRpc();
+        // Informování serveru (vlastní instance) o ukončení
+        if (GameManager.Instance != null && GameManager.Instance.IsSpawned)
+        {
+            GameManager.Instance.RequestEndGameServerRpc();
+        }
+
+        if (SteamManager.Instance != null)
+        {
+            SteamManager.Instance.LeaveLobby();
+        }
+
+        if (AppManager.Instance != null)
+        {
+            AppManager.Instance.GoToMainMenu();
+        }
     }
 
     // --- ADMIN LOGIC (Kick) ---
@@ -179,5 +210,14 @@ public class PauseMenuUI : MonoBehaviour
         GameManager.Instance.KickPlayerServerRpc(targetId);
         // Refresh listu po krátké prodlevě
         Invoke(nameof(RefreshPlayerList), 0.5f);
+    }
+
+    public void OnRestartClicked()
+    {
+        if (!_isHost) return;
+
+        // Pro Netcode synchronizovaný restart napříč klienty
+        string currentSceneName = SceneManager.GetActiveScene().name;
+        NetworkManager.Singleton.SceneManager.LoadScene(currentSceneName, LoadSceneMode.Single);
     }
 }

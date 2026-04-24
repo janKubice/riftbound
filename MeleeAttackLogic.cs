@@ -1,5 +1,6 @@
 using UnityEngine;
 using Unity.Netcode;
+using System.Collections.Generic; // Přidáno pro List
 
 [CreateAssetMenu(fileName = "MeleeAttack", menuName = "Attacks/Melee Logic")]
 public class MeleeAttackLogic : AttackLogic
@@ -38,7 +39,7 @@ public class MeleeAttackLogic : AttackLogic
                     // A) Zásah Nepřítele
                     if (hit.TryGetComponent(out EnemyHealth enemy) || (enemy = hit.GetComponentInParent<EnemyHealth>()))
                     {
-                        enemy.TakeDamage(finalDamage);
+                        enemy.TakeDamage(finalDamage, attacker.OwnerClientId); // Přidán attacker.OwnerClientId
                         if (stats.Knockback > 0 && strike == 0) // Knockback jen při první ráně, ať neletí na Mars
                         {
                             Vector3 knockDir = (hit.transform.position - attacker.transform.position);
@@ -50,7 +51,7 @@ public class MeleeAttackLogic : AttackLogic
                     // B) Zásah Hráče
                     else if (hit.TryGetComponent(out PlayerAttributes player))
                     {
-                        player.TakeDamageServerRpc(finalDamage);
+                        player.TakeDamageServerRpc(finalDamage, attacker.OwnerClientId); // Přidán attacker.OwnerClientId
                         entityHit = true;
                     }
 
@@ -61,11 +62,22 @@ public class MeleeAttackLogic : AttackLogic
                     }
 
                     // D) SPUŠTĚNÍ EFEKTŮ Z BATOHU (Každý strike = nový Meteor/Ricochet!)
-                    if (entityHit && stats.OnHitEffects != null)
+                    if (stats.OnHitEffects != null && stats.OnHitEffects.Count > 0)
                     {
-                        foreach (var effect in stats.OnHitEffects)
+                        // 1. Vezmeme POUZE PRVNÍ efekt na řadě
+                        HitEffect activeEffect = stats.OnHitEffects[0];
+
+                        // 2. Vytvoříme zbytek fronty (vše kromě prvního efektu)
+                        List<HitEffect> remainingPayload = new List<HitEffect>();
+                        for (int p = 1; p < stats.OnHitEffects.Count; p++)
                         {
-                            if (effect != null) effect.OnHit(hit.ClosestPoint(origin), hit.gameObject, attacker, weaponManager);
+                            remainingPayload.Add(stats.OnHitEffects[p]);
+                        }
+
+                        // 3. Spustíme aktivní efekt a předáme mu zbytek batohu
+                        if (activeEffect != null)
+                        {
+                            activeEffect.OnHit(hit.ClosestPoint(origin), hit.gameObject, attacker, weaponManager, remainingPayload);
                         }
                     }
 

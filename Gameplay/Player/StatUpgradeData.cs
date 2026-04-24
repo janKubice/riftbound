@@ -9,6 +9,8 @@ public class StatUpgradeData : ScriptableObject
     public Sprite Icon;
     [TextArea] public string Description;
 
+    [SerializeField] public bool inDemo = false;
+
     [Header("Ekonomika")]
     public int BaseCost = 100;           // Cena prvního levelu
     public float CostMultiplier = 1.5f;  // Jak moc se zdraží další level (100 -> 150 -> 225...)

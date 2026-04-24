@@ -52,15 +52,15 @@ public class PlayerProgression : NetworkBehaviour
 
         CurrentXP.OnValueChanged += (o, n) => OnResourcesChanged?.Invoke();
         Gold.OnValueChanged += (o, n) => OnResourcesChanged?.Invoke();
-        Essence.OnValueChanged += (o, n) => OnResourcesChanged?.Invoke(); 
-        
+        Essence.OnValueChanged += (o, n) => OnResourcesChanged?.Invoke();
+
         _upgradeLevels.OnListChanged += (changeEvent) =>
         {
             RecalculateStats();
             OnUpgradePurchased?.Invoke();
         };
 
-        RecalculateStats(); 
+        RecalculateStats();
         OnResourcesChanged?.Invoke();
     }
 
@@ -229,6 +229,23 @@ public class PlayerProgression : NetworkBehaviour
     public float GetStatMultiplier(StatType type, float baseValue = 1.0f)
     {
         return baseValue + GetStatBonus(type);
+    }
+
+    /// <summary>
+    /// Zkontroluje, jestli hráč má alespoň 1 level v daném upgradu (např. pro odemknutí pasivní schopnosti).
+    /// </summary>
+    /// <param name="type"></param>
+    /// <returns></returns>
+    public bool HasUpgrade(StatType type)
+    {
+        for (int i = 0; i < _availableUpgrades.Count; i++)
+        {
+            if (_availableUpgrades[i].Type == type)
+            {
+                return GetUpgradeLevel(i) >= 1;
+            }
+        }
+        return false;
     }
 
     // UI Helpers

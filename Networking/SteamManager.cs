@@ -20,6 +20,7 @@ namespace RogueDeckCoop.Networking
         // --- STAV ---
         private bool _isSteamInitialized = false;
         public bool IsSteamInitialized => _isSteamInitialized;
+        public bool IsDirectToArena { get; private set; }
         // Mapa: ClientID -> CharacterID (uchová výběr při přechodu do hry)
         public Dictionary<ulong, int> FinalCharacterSelections = new Dictionary<ulong, int>();
 
@@ -133,6 +134,8 @@ namespace RogueDeckCoop.Networking
             Debug.Log($"[SteamManager] Volání HostLobby. IsSteamInitialized: {_isSteamInitialized}");
             if (!_isSteamInitialized) return;
 
+            IsDirectToArena = false;
+
             _targetLobbyName = string.IsNullOrEmpty(lobbyName) ? $"{PlayerName}'s Game" : lobbyName;
             _hostingPassword = password;
 
@@ -152,6 +155,27 @@ namespace RogueDeckCoop.Networking
             else
             {
                 Debug.Log($"[SteamManager] Požadavek na lobby odeslán pod handlem: {handle}");
+            }
+        }
+
+        /// <summary>
+        /// Založí solo arénu (vlastně lobby pro jednoho hráče, bez hesla).
+        /// </summary>
+        /// <param name="arenaSceneName"> Název scény arény </param>
+        public void HostArenaSolo(string arenaSceneName = "ArenaScene")
+        {
+            if (!_isSteamInitialized) return;
+
+            IsDirectToArena = true;
+            _targetLobbyName = $"{PlayerName}'s Solo Arena";
+            _hostingPassword = ""; // Solo nepotřebuje heslo
+
+            // Založíme privátní lobby s kapacitou 1 (při přechodu na Co-op stačí změnit na 4)
+            SteamAPICall_t handle = SteamMatchmaking.CreateLobby(ELobbyType.k_ELobbyTypePrivate, 1);
+
+            if (handle == SteamAPICall_t.Invalid)
+            {
+                Debug.LogError("[SteamManager] SteamMatchmaking.CreateLobby vrátil INVALID HANDLE!");
             }
         }
 
@@ -303,18 +327,27 @@ namespace RogueDeckCoop.Networking
             // Logika pro refresh seznamu hráčů v lobby (bude řešit LobbyManager)
         }
 
+        /// <summary>
+        /// Tato metoda se volá, když server (hostitel) úspěšně spustí. Zde můžeme načíst správnou scénu pro Lobby nebo Arénu.
+        /// </summary>
         private void HandleServerStarted()
         {
-            // ... existující kód ...
-
-            // HOOK: Aktivace automatického loadingu
             LoadingScreenManager.Instance.HookIntoNetworkEvents();
 
             if (NetworkManager.Singleton.IsHost)
             {
-                // Před načtením Lobby scény manuálně vyvoláme loading (protože LoadScene event se teprve odpálí)
-                LoadingScreenManager.Instance.Show("Creating Lobby...");
-                NetworkManager.Singleton.SceneManager.LoadScene("LobbyScene", UnityEngine.SceneManagement.LoadSceneMode.Single);
+                if (IsDirectToArena)
+                {
+                    // Přeskočíme Lobby a jdeme rovnou do Arény
+                    LoadingScreenManager.Instance.Show("Loading Arena...");
+                    NetworkManager.Singleton.SceneManager.LoadScene("ArenaScene", UnityEngine.SceneManagement.LoadSceneMode.Single);
+                }
+                else
+                {
+                    // Standardní multiplayer cesta
+                    LoadingScreenManager.Instance.Show("Creating Lobby...");
+                    NetworkManager.Singleton.SceneManager.LoadScene("LobbyScene", UnityEngine.SceneManagement.LoadSceneMode.Single);
+                }
             }
         }
 
@@ -354,23 +387,13 @@ namespace RogueDeckCoop.Networking
         // --- NOVÁ METODA: Zpracování odpojení ---
         private void OnClientDisconnect(ulong clientId)
         {
-            // Zajímá nás jen, když se odpojíme MY (jako klient), ne když se odpojí někdo jiný
-            if (clientId == NetworkManager.Singleton.LocalClientId)
+            if (NetworkManager.Singleton != null && clientId == NetworkManager.Singleton.LocalClientId)
             {
-                // Pokud jsme Host a vypínáme hru, není to chyba
-                if (NetworkManager.Singleton.IsHost) return;
-
-                // Získáme důvod odpojení (který jsme nastavili v ApprovalCheck jako response.Reason)
                 string reason = NetworkManager.Singleton.DisconnectReason;
-
-                if (string.IsNullOrEmpty(reason))
-                {
-                    reason = "Connection lost or failed.";
-                }
+                if (string.IsNullOrEmpty(reason)) reason = "Connection lost or failed.";
 
                 Debug.LogWarning($"[SteamManager] Disconnected: {reason}");
 
-                // Vyvoláme event pro UI, zároveň opustíme Steam lobby, abychom nezůstali viset
                 LeaveLobby();
                 OnConnectionFailed?.Invoke(reason);
             }

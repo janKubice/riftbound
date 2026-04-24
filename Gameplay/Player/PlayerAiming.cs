@@ -9,10 +9,10 @@ public class PlayerAiming : NetworkBehaviour
     [SerializeField] private Rig _aimRig; // Komponenta Rig na objektu AimRig
     [SerializeField] private float _aimSmoothSpeed = 15f;
 
-    [Header("Aiming Logic")] 
+    [Header("Aiming Logic")]
     [SerializeField] private float _maxAimDistance = 1000000f;
     [Tooltip("Vrstvy, do kterých může Raycast narazit. MUSÍTE zde odškrtnout vrstvu 'Player'!")]
-    [SerializeField] private LayerMask _aimLayers; 
+    [SerializeField] private LayerMask _aimLayers;
     [Tooltip("Pokud je překážka blíž než tato vzdálenost, budeme ji ignorovat a mířit do dálky (řeší zdi těsně za zády).")]
     [SerializeField] private float _minAimDistance = 1.5f;
 
@@ -96,7 +96,7 @@ public class PlayerAiming : NetworkBehaviour
 
         // 1. Raycast ze středu obrazovky
         Ray ray = _mainCamera.ViewportPointToRay(new Vector3(0.5f, 0.5f, 0));
-        
+
         // Výchozí bod v dálce (pokud nic netrefíme nebo trefíme něco moc blízko)
         Vector3 pointAtInfinity = ray.GetPoint(_maxAimDistance);
 

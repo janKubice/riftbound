@@ -21,7 +21,7 @@ public class StatusEffectReceiver : NetworkBehaviour
     private void Awake()
     {
         _playerAttributes = GetComponent<PlayerAttributes>();
-        _enemyHealth = GetComponent<EnemyHealth>(); // OPRAVENO: Získání reference
+        _enemyHealth = GetComponent<EnemyHealth>();
     }
 
     public override void OnNetworkDespawn()

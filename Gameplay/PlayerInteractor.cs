@@ -60,7 +60,8 @@ public class PlayerInteractor : NetworkBehaviour
 
             if (_playerCamera == null)
             {
-                _playerCamera = GetComponentInChildren<Camera>();
+                // Vezme vždy a pouze kameru s tagem "MainCamera"
+                _playerCamera = Camera.main;
             }
 
             // První pokus o nalezení UI

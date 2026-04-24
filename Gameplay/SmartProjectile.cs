@@ -12,16 +12,18 @@ public class SmartProjectile : NetworkBehaviour
     protected ulong _attackerObjectId;
     private int _pierceLeft;
     private Vector3 _startPosition;
-    private HashSet<GameObject> _hitHistory = new HashSet<GameObject>();
+    protected HashSet<GameObject> _hitHistory = new HashSet<GameObject>();    
     protected Rigidbody _rb;
+    
     [SerializeField] private GameObject _impactVfxPrefab;
     protected List<HitEffect> _payload = new List<HitEffect>();
 
-    // --- FIX 1: Ochrana proti okamžitému výbuchu (Grace Period) ---
+    // Ochrana proti okamžitému výbuchu (Grace Period) ---
     private float _spawnTime;
     private const float COLLISION_GRACE_PERIOD = 0.05f; // 50ms ignorování kolizí po spawnu
+    public HashSet<GameObject> HitHistory => _hitHistory;
 
-    public virtual void Initialize(NetworkObject attacker, Vector3 direction, WeaponStats stats, List<HitEffect> payload = null)
+    public virtual void Initialize(NetworkObject attacker, Vector3 direction, WeaponStats stats, List<HitEffect> payload = null, HashSet<GameObject> passedHitHistory = null)
     {
         _attackerObjectId = attacker.NetworkObjectId;
         _stats = stats;
@@ -30,14 +32,19 @@ public class SmartProjectile : NetworkBehaviour
 
         if (payload != null)
         {
-            _payload = new List<HitEffect>(payload); // Vytvoříme kopii
+            _payload = new List<HitEffect>(payload);
         }
         else if (stats.OnHitEffects != null)
         {
-            _payload = new List<HitEffect>(stats.OnHitEffects); // Kopie ze zbraně
+            _payload = new List<HitEffect>(stats.OnHitEffects);
         }
 
-        // Zaznamenáme čas vzniku
+        // Přenos historie z předchozího projektilu (Ricochet)
+        if (passedHitHistory != null)
+        {
+            _hitHistory = new HashSet<GameObject>(passedHitHistory);
+        }
+
         _spawnTime = Time.time;
 
         _rb = GetComponent<Rigidbody>();
@@ -47,6 +54,21 @@ public class SmartProjectile : NetworkBehaviour
 
     public override void OnDestroy()
     {
+        // 1. Ochrana proti Memory Leaku ze ScriptableObjects
+        if (_payload != null)
+        {
+            foreach (var effect in _payload)
+            {
+                // Pokud byl efekt naklonován za běhu (např. Ricochet s nižším MaxBounces)
+                if (effect != null && effect.name.Contains("(Clone)"))
+                {
+                    Destroy(effect); // Bezpečně odstraní SO z paměti
+                }
+            }
+            _payload.Clear();
+        }
+
+        // 2. Kontrola sítě
         if (NetworkObject != null && NetworkObject.IsSpawned && !NetworkManager.Singleton.IsServer)
         {
             if (!NetworkManager.Singleton.ShutdownInProgress)
@@ -62,7 +84,6 @@ public class SmartProjectile : NetworkBehaviour
     {
         if (IsServer)
         {
-            // Serverová pojistka pro automatické zničení po čase
             StartCoroutine(LifetimeLimit());
         }
     }
@@ -77,89 +98,76 @@ public class SmartProjectile : NetworkBehaviour
     {
         if (!IsServer) return;
 
-        // Kontrola dostřelu
         if (Vector3.SqrMagnitude(_startPosition - transform.position) >= _stats.Range * _stats.Range)
         {
             DestroyProjectile();
         }
     }
 
-    private void OnTriggerEnter(Collider other)
+    protected virtual void OnTriggerEnter(Collider other)
     {
         if (!IsServer) return;
         if (Time.time < _spawnTime + COLLISION_GRACE_PERIOD) return;
-
-        var netObj = other.GetComponentInParent<NetworkObject>();
-        if (netObj != null && netObj.NetworkObjectId == _attackerObjectId) return;
-
         if (_hitHistory.Contains(other.gameObject)) return;
 
-        bool destroyProjectile = false;
-        bool hitSomethingValid = false;
-
-        // 1. Foliage (jen vizuál, payload nespouštíme)
+        // Foliage reakce (nepoškozuje, ale projde skrz a spustí animaci)
         if (other.TryGetComponent(out InteractiveFoliage foliage))
         {
             foliage.OnHit(transform.forward);
+            return; 
         }
 
+        var netObj = other.GetComponentInParent<NetworkObject>();
+        if (netObj != null && netObj.NetworkObjectId == _attackerObjectId) return; // Ignorovat kolize s vlastní sítí (např. zbraní, která může mít kolider)
+        
+        bool destroyProjectile = false;
+        bool forceDestroy = false; 
+        bool hitSomethingValid = false;
+
+        Vector3 hitPos = GetSafeHitPosition(other);
+
         // 2. Destructible Prop
-        else if (other.TryGetComponent(out DestructibleProp prop))
+        if (other.TryGetComponent(out DestructibleProp prop))
         {
             prop.TakeHit();
             hitSomethingValid = true;
             destroyProjectile = true;
-
-            // I na bednu můžeme aplikovat efekty (např. exploze ji zničí víc)
-            ExecutePayload(other.gameObject, transform.position);
+            ExecutePayload(other.gameObject, hitPos);
         }
-
         // 3. Enemy
         else if (other.TryGetComponent(out EnemyHealth enemy) || (enemy = other.GetComponentInParent<EnemyHealth>()))
         {
-            // A) Základní poškození (ze statistik zbraně)
             enemy.TakeDamage(_stats.Damage, _attackerObjectId);
-
-            // B) Spuštění PROC efektů (Chain Lightning, atd.)
-            ExecutePayload(other.gameObject, GetSafeHitPosition(other));
-
+            ExecutePayload(other.gameObject, hitPos);
             hitSomethingValid = true;
             destroyProjectile = true;
         }
-
         // 4. Player (PvP)
         else if (other.TryGetComponent(out PlayerAttributes player) || (player = other.GetComponentInParent<PlayerAttributes>()))
         {
-            player.TakeDamageServerRpc(_stats.Damage);
-
-            // B) Spuštění efektů i na hráče
-            ExecutePayload(other.gameObject, GetSafeHitPosition(other));
-
+            player.TakeDamageServerRpc(_stats.Damage, _attackerObjectId);
+            ExecutePayload(other.gameObject, hitPos);
             hitSomethingValid = true;
             destroyProjectile = true;
         }
-
         // 5. Zeď / Podlaha
         else if (!other.isTrigger)
         {
-            // Použijeme naši bezpečnou metodu
-            ExecutePayload(other.gameObject, GetSafeHitPosition(other));
-
-            destroyProjectile = true;
+            ExecutePayload(other.gameObject, hitPos);
             hitSomethingValid = true;
+            destroyProjectile = true;
+            forceDestroy = true; 
         }
 
         // --- VYHODNOCENÍ ---
         if (hitSomethingValid)
         {
             _hitHistory.Add(other.gameObject);
-
-            Vector3 hitPos = GetSafeHitPosition(other);
             SpawnImpact(hitPos, -transform.forward);
 
             if (destroyProjectile)
             {
-                if (_pierceLeft > 0)
+                if (_pierceLeft > 0 && !forceDestroy)
                 {
                     _pierceLeft--;
                 }
@@ -173,60 +181,62 @@ public class SmartProjectile : NetworkBehaviour
 
     protected void ExecutePayload(GameObject target, Vector3 hitPosition)
     {
-        // Pokud nemáme žádné efekty, končíme
+        // KASKÁDOVÁNÍ: Pokud nemáme efekty, končíme
         if (_payload == null || _payload.Count == 0) return;
 
-        // Potřebujeme referenci na útočníka a jeho WeaponManager
-        // Najdeme NetworkObject útočníka podle ID
         if (NetworkManager.Singleton.SpawnManager.SpawnedObjects.TryGetValue(_attackerObjectId, out NetworkObject attackerObj))
         {
-            // Získáme WeaponManager (aby efekty mohly volat další útoky)
             WeaponManager wm = attackerObj.GetComponent<WeaponManager>();
 
-            // Projdeme všechny efekty v batohu a odpálíme je
-            foreach (var effect in _payload)
+            // 1. Vezmeme POUZE PRVNÍ efekt na řadě
+            HitEffect activeEffect = _payload[0];
+
+            // 2. Vytvoříme zbytek fronty (vše kromě prvního efektu)
+            List<HitEffect> remainingPayload = new List<HitEffect>();
+            for (int i = 1; i < _payload.Count; i++)
             {
-                if (effect != null)
-                {
-                    effect.OnHit(hitPosition, target, attackerObj, wm);
-                }
+                remainingPayload.Add(_payload[i]);
+            }
+
+            // 3. Spustíme aktivní efekt a předáme mu zbytek batohu
+            if (activeEffect != null)
+            {
+                activeEffect.OnHit(hitPosition, target, attackerObj, wm, remainingPayload);
             }
         }
     }
 
     private Vector3 GetSafeHitPosition(Collider other)
     {
-        // Pokud trefíme podlahu nebo složitou zeď (non-convex MeshCollider), 
-        // ClosestPoint by vyhodil chybu. Místo toho rovnou vrátíme pozici projektilu.
         if (other is MeshCollider meshCollider && !meshCollider.convex)
         {
             return transform.position;
         }
-
-        // Pro běžné objekty (nepřátelé, bedny) použijeme přesný výpočet
         return other.ClosestPoint(transform.position);
+    }
+
+    public void AddIgnoredTarget(GameObject target)
+    {
+        if (target != null)
+        {
+            _hitHistory.Add(target);
+        }
     }
 
     private void SpawnImpact(Vector3 pos, Vector3 normal)
     {
-        // Pokud nemáme efekt, končíme
         if (_impactVfxPrefab == null) return;
-
-        // Zavoláme ClientRpc, aby se efekt přehrál u všech hráčů
         SpawnImpactClientRpc(pos, normal);
     }
 
     [ClientRpc]
     private void SpawnImpactClientRpc(Vector3 pos, Vector3 normal)
     {
-        // Vytvoříme efekt lokálně (nemusí mít NetworkObject, je to jen vizuál)
         GameObject vfx = Instantiate(_impactVfxPrefab, pos, Quaternion.LookRotation(normal));
-
-        // Zničíme efekt po 2 sekundách, aby nezaplnil paměť
         Destroy(vfx, 2.0f);
     }
 
-    private void DestroyProjectile()
+    protected void DestroyProjectile()
     {
         if (IsServer && NetworkObject != null && NetworkObject.IsSpawned)
         {

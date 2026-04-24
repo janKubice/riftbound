@@ -20,7 +20,7 @@ public class WeaponVisualsController : MonoBehaviour
         }
         _vfxPool.Clear();
         if (_activeLaserInstance != null) Destroy(_activeLaserInstance.gameObject);
-        _isLaserWeapon = data.IsContinuous;
+        _isLaserWeapon = data.IsLaserWeapon;
         // 2. Nastavení referencí pro nový typ zbraně
         _currentVfxPrefab = data.IsRanged ? data.MuzzleFlashPrefab : data.MuzzleFlashPrefab; // Uprav dle potřeby (Swing vs Muzzle)
 
@@ -103,7 +103,7 @@ public class WeaponVisualsController : MonoBehaviour
     {
         if (!_isLaserWeapon)
         {
-            // Pokud se toto vypisuje, nemáš zaškrtnuté "Is Continuous" ve WeaponData!
+            // Pokud se toto vypisuje, nemáš zaškrtnuté "Is Laser Weapon" ve WeaponData!
             Debug.LogWarning("Není označeno jako LaserWeapon!");
             return;
         }
