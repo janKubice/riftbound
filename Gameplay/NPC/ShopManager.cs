@@ -2,6 +2,7 @@ using UnityEngine;
 using UnityEngine.UI;
 using TMPro;
 using Unity.Netcode;
+using System.Collections.Generic;
 
 public class ShopManager : MonoBehaviour
 {
@@ -13,10 +14,14 @@ public class ShopManager : MonoBehaviour
     [SerializeField] private GameObject _itemButtonPrefab; // Prefab musí mít WeaponShopItemUI
     [SerializeField] private Button _sellButton;
     [SerializeField] private TextMeshProUGUI _sellButtonText;
+    [SerializeField] private TextMeshProUGUI _playerGoldText;
 
     private NPCInteractable _currentNpc;
     private PlayerShopLogic _localPlayerLogic; // Reference na konkrétního hráče
     private WeaponManager _monitoredWeaponManager;
+    private PlayerProgression _localProgression;
+
+    private List<WeaponShopItemUI> _spawnedItems = new List<WeaponShopItemUI>();
 
     private void Awake()
     {
@@ -29,15 +34,15 @@ public class ShopManager : MonoBehaviour
     {
         _currentNpc = npc;
 
-        // 1. NAJDEME LOKÁLNÍHO HRÁČE (Bezpečnější než statická instance)
         if (NetworkManager.Singleton.LocalClient != null && NetworkManager.Singleton.LocalClient.PlayerObject != null)
         {
             _localPlayerLogic = NetworkManager.Singleton.LocalClient.PlayerObject.GetComponent<PlayerShopLogic>();
+            _localProgression = _localPlayerLogic.GetComponent<PlayerProgression>();
         }
 
-        if (_localPlayerLogic == null)
+        if (_localPlayerLogic == null || _localProgression == null)
         {
-            Debug.LogError("[ShopManager] CHYBA: Nenalezen PlayerShopLogic na lokálním hráči!");
+            Debug.LogError("[ShopManager] CHYBA: Chybí PlayerShopLogic nebo PlayerProgression na lokálním hráči!");
             return;
         }
 
@@ -45,25 +50,33 @@ public class ShopManager : MonoBehaviour
         _monitoredWeaponManager = _localPlayerLogic.GetComponent<WeaponManager>();
         if (_monitoredWeaponManager != null)
         {
-            // Nasloucháme změně zbraně (předchozí hodnota, nová hodnota)
             _monitoredWeaponManager.CurrentWeaponIndex.OnValueChanged += HandleWeaponChanged;
         }
 
-        RefreshShopUI();
-        _shopPanel.SetActive(true);
+        // Naslouchání na změnu zlaťáků
+        _localProgression.Gold.OnValueChanged += HandleGoldChanged;
 
-        // Odemknout myš
+        RefreshShopUI();
+        UpdateGoldText(_localProgression.Gold.Value);
+
+        _shopPanel.SetActive(true);
         Cursor.lockState = CursorLockMode.None;
         Cursor.visible = true;
     }
 
     public void CloseShop()
     {
-        // --- ODHLÁŠENÍ Z ODBĚRU (Důležité proti memory leakům) ---
+        // --- ODHLÁŠENÍ Z ODBĚRU ---
         if (_monitoredWeaponManager != null)
         {
             _monitoredWeaponManager.CurrentWeaponIndex.OnValueChanged -= HandleWeaponChanged;
             _monitoredWeaponManager = null;
+        }
+
+        if (_localProgression != null)
+        {
+            _localProgression.Gold.OnValueChanged -= HandleGoldChanged;
+            _localProgression = null;
         }
 
         _shopPanel.SetActive(false);
@@ -85,16 +98,35 @@ public class ShopManager : MonoBehaviour
         }
     }
 
+    private void HandleGoldChanged(int oldVal, int newVal)
+    {
+        UpdateGoldText(newVal);
+
+        // Update cenové dostupnosti na všech kartách
+        foreach (var item in _spawnedItems)
+        {
+            item.UpdateAffordability(newVal);
+        }
+    }
+
+    private void UpdateGoldText(int amount)
+    {
+        if (_playerGoldText != null)
+        {
+            _playerGoldText.text = $"Gold: {amount}";
+        }
+    }
 
     private void RefreshShopUI()
     {
         // Vyčistit stará tlačítka
         foreach (Transform child in _itemsContainer) Destroy(child.gameObject);
+        _spawnedItems.Clear();
 
-        // Získat WeaponManager pro data zbraní
         var weaponManager = _localPlayerLogic.GetComponent<WeaponManager>();
+        int currentGold = _localProgression.Gold.Value;
 
-        // Vygenerovat tlačítka pro zbraně, které NPC prodává
+        // Vygenerovat tlačítka
         foreach (int index in _currentNpc.WeaponIndexesForSale)
         {
             WeaponData data = weaponManager.GetWeaponDataByIndex(index);
@@ -104,12 +136,14 @@ public class ShopManager : MonoBehaviour
                 GameObject btnObj = Instantiate(_itemButtonPrefab, _itemsContainer);
                 WeaponShopItemUI itemUI = btnObj.GetComponent<WeaponShopItemUI>();
 
-                // Nastavení tlačítka + Co se stane při kliknutí
-                itemUI.Setup(data, () =>
+                itemUI.Setup(data, currentGold, () =>
                 {
-                    Debug.Log($"[UI] Kliknuto na {data.WeaponName}");
+                    // Okamžitá lokální odezva zamezující spamování tlačítka
+                    itemUI.SetInteractable(false);
                     _localPlayerLogic.ClientBuyWeapon(index, data.GoldPrice);
                 });
+
+                _spawnedItems.Add(itemUI);
             }
         }
 
@@ -118,27 +152,32 @@ public class ShopManager : MonoBehaviour
 
     private void UpdateSellButton(WeaponManager wm)
     {
-        int currentWeaponIndex = wm._currentWeaponIndex.Value;
+        int currentWeaponIndex = wm.CurrentWeaponIndex.Value; // Ujisti se, že přistupuješ k .Value přes public property
 
         if (currentWeaponIndex != -1)
         {
             WeaponData currentData = wm.GetWeaponDataByIndex(currentWeaponIndex);
+            if (currentData == null) return;
+
             int sellPrice = currentData.GoldPrice / 2;
 
             _sellButton.interactable = true;
-            _sellButtonText.text = $"Prodat zbraň ({sellPrice} G)";
+            _sellButtonText.text = $"Sell Weapon ({sellPrice} G)";
 
             _sellButton.onClick.RemoveAllListeners();
             _sellButton.onClick.AddListener(() =>
             {
+                // Okamžitá lokální odezva na click
+                _sellButton.interactable = false;
+                _sellButtonText.text = "Selling...";
+
                 _localPlayerLogic.ClientSellWeapon(sellPrice);
-                CloseShop(); // Volitelné zavření po prodeji
             });
         }
         else
         {
             _sellButton.interactable = false;
-            _sellButtonText.text = "Žádná zbraň";
+            _sellButtonText.text = "No Weapon";
         }
     }
 }

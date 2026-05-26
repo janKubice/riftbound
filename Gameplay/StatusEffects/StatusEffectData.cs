@@ -20,7 +20,8 @@ public class StatusEffectData : ScriptableObject
     [Header("Tick Logic (DoT / HoT)")]
     public float TickInterval = 1.0f; 
     public float DamagePerTick = 0f;
-    public bool IsDamagePercentage = false; // % z Max HP (dobré proti bossům)
+    public float HealPerTick = 0f; 
+    public bool IsDamagePercentage = false;
 
     [Header("Stat Modifikátory")]
     public float SpeedMultiplier = 1.0f; // 1 = normál, 0 = root

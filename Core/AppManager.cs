@@ -7,6 +7,8 @@ public class AppManager : PersistentSingleton<AppManager>
     private const string MainMenuSceneName = "MainMenuScene";
     private const string GameSceneName = "GameScene";
 
+ 
+
     // Call this function after initializing all systems (e.g., Steam)
     public void GoToMainMenu()
     {

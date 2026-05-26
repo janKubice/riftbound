@@ -14,6 +14,8 @@ public class PlayerController : NetworkBehaviour
     [SerializeField] private float _moveSpeed = 5.0f;
     [SerializeField] private float _rotationSpeed = 200f; // Nyní je to citlivost myši
     public Vector3 Velocity => new Vector3(_controller.velocity.x, 0, _controller.velocity.z);
+    public Vector3 FullVelocity => _controller != null ? _controller.velocity : Vector3.zero;
+    public float VerticalVelocity => _controller != null ? _controller.velocity.y : _playerVelocity.y;
 
     [Header("Air Control")]
     [Range(0, 1)][SerializeField] private float _airControlFactor = 0.5f; // 50% ovladatelnost ve vzduchu
@@ -64,6 +66,7 @@ public class PlayerController : NetworkBehaviour
     [Header("Komponenty Hráče")]
     [SerializeField] private GameObject _playerVirtualCameraObject;
     [SerializeField] private WeaponManager _weaponManager;
+    [SerializeField] private PlayerCameraEffects playerCameraEffects;
 
     [Header("Komponenty pro deaktivaci")]
     [SerializeField] private CharacterController _controller;
@@ -88,6 +91,9 @@ public class PlayerController : NetworkBehaviour
     [Header("Shop Levitation")]
     [SerializeField] private float _levitationHeight = 2.0f; // Jak vysoko vyletí
     [SerializeField] private float _levitationSpeed = 0.5f;  // Jak rychle tam vyletí
+
+    [Header("Model Motion FX")]
+    [SerializeField] private PlayerModelMotionFX _modelMotionFX;
 
 
     private bool _isSitting = false;
@@ -131,6 +137,15 @@ public class PlayerController : NetworkBehaviour
     private bool _inputLocked = false;
     private bool _isStaminaEmptyPlayed = false;
 
+    [Header("External Forces")]
+    [SerializeField] private float _externalVelocityDecay = 14f;
+    [SerializeField] private float _maxExternalHorizontalSpeed = 8f;
+    [SerializeField] private float _maxExternalUpSpeed = 7f;
+    [SerializeField] private float _maxExternalDownSpeed = 12f;
+
+    private Vector3 _externalVelocity;
+    private float _externalVelocityDuration;
+
     [Header("Slam Passive")]
     [SerializeField] private GameObject _slamVfxPrefab; // Vizuál výbuchu (např. prach/kameny)
     [SerializeField] private float _minFallDistanceForSlam = 2.0f; // Jak z výšky musí spadnout, aby to bouchlo
@@ -154,6 +169,8 @@ public class PlayerController : NetworkBehaviour
         if (_animator == null) _animator = GetComponent<Animator>();
         if (_playerEmotes == null) _playerEmotes = GetComponent<PlayerEmotes>();
         if (_progression == null) _progression = GetComponent<PlayerProgression>();
+        if (_modelMotionFX == null)
+            _modelMotionFX = GetComponentInChildren<PlayerModelMotionFX>(true);
 
         _attributes = GetComponent<PlayerAttributes>();
 
@@ -172,6 +189,7 @@ public class PlayerController : NetworkBehaviour
         _playerVFX = GetComponent<PlayerVFX>();
         _impulseSource = GetComponent<CinemachineImpulseSource>();
         _statusReceiver = GetComponent<StatusEffectReceiver>();
+        playerCameraEffects = GetComponentInChildren<PlayerCameraEffects>();
 
         _originalHeight = _controller.height;
         _originalCenter = _controller.center;
@@ -217,6 +235,12 @@ public class PlayerController : NetworkBehaviour
         if (!IsOwner) return;
         _isFireInputHeld = context.ReadValue<float>() > 0.5f;
         OnLocalPlayerAttacked?.Invoke();
+
+        playerCameraEffects.AddRecoil(
+            backwardKick: 0.025f,
+            pitchKick: 0.8f,
+            yawKick: UnityEngine.Random.Range(-0.25f, 0.25f)
+        );
     }
 
     // NOVÁ METODA PRO SPRINT
@@ -247,6 +271,10 @@ public class PlayerController : NetworkBehaviour
 
         if (_attributes.ConsumeStamina(_dodgeStaminaCost))
         {
+            if (SteamStatsManager.Instance != null)
+            {
+                SteamStatsManager.Instance.IncrementStat(SteamStatIds.DashesPerformed);
+            }
             OnLocalPlayerDodged?.Invoke();
             // 1. Logika směru
             Vector2 dodgeInput = _moveInput;
@@ -314,7 +342,10 @@ public class PlayerController : NetworkBehaviour
 
             // Aplikujeme pouze gravitaci
             HandleGravity();
-            _controller.Move(new Vector3(0, _playerVelocity.y, 0) * Time.deltaTime);
+            _controller.Move(
+                new Vector3(0, _playerVelocity.y, 0) * Time.deltaTime
+                + GetExternalMovementThisFrame()
+            );
 
             // Aktualizujeme animace (aby přešla do Idle)
             HandleAnimation();
@@ -326,11 +357,17 @@ public class PlayerController : NetworkBehaviour
         // Pokud jsme omráčení, nesmíme nic dělat
         if (_statusReceiver != null && _statusReceiver.IsStunned)
         {
-            // Můžeme případně vypnout animátor parametry pro pohyb
             _moveInput = Vector2.zero;
-            HandleAnimation(); // Aby se přehrála Idle animace
+
             HandleGravity();
-            return; // Ukončíme Update před pohybem a střelbou
+
+            _controller.Move(
+                new Vector3(0, _playerVelocity.y, 0) * Time.deltaTime
+                + GetExternalMovementThisFrame()
+            );
+
+            HandleAnimation();
+            return;
         }
 
         if (_inputLocked)
@@ -339,7 +376,10 @@ public class PlayerController : NetworkBehaviour
                              // Pokud chceš levitovat, můžeš dát: if (!_inputLocked) HandleGravity();
 
             // Aplikujeme pouze vertikální pohyb (pád), žádný WASD
-            _controller.Move(new Vector3(0, _playerVelocity.y, 0) * Time.deltaTime);
+            _controller.Move(
+                new Vector3(0, _playerVelocity.y, 0) * Time.deltaTime
+                + GetExternalMovementThisFrame()
+            );
 
             // Animace musíme stále posílat (že stojíme), jinak se zaseknou
             HandleAnimation();
@@ -370,7 +410,10 @@ public class PlayerController : NetworkBehaviour
 
             // Aplikujeme POUZE vertikální pohyb (gravitaci).
             // Horizontální pohyb řeší DodgeRoutine.
-            _controller.Move(new Vector3(0, _playerVelocity.y, 0) * Time.deltaTime);
+            _controller.Move(
+                new Vector3(0, _playerVelocity.y, 0) * Time.deltaTime
+                + GetExternalMovementThisFrame()
+            );
             return; // Ukončíme Update, zbytek se neprovede
         }
 
@@ -381,14 +424,11 @@ public class PlayerController : NetworkBehaviour
         HandleRotation();
         HandleSprintStamina();
 
-        // 3. Získáme horizontální pohyb (při stání to bude Vector3.zero)
         Vector3 horizontalMove = GetHorizontalMovement();
-
-        // 4. Vytvoříme finální vertikální pohyb
         Vector3 verticalMove = new Vector3(0, _playerVelocity.y, 0) * Time.deltaTime;
+        Vector3 externalMove = GetExternalMovementThisFrame();
+        _controller.Move(horizontalMove + verticalMove + externalMove);
 
-        // 5. Zkombinujeme oba vektory a zavoláme Move() POUZE JEDNOU
-        _controller.Move(horizontalMove + verticalMove);
         HandleFootsteps();
         // Logika pro automatickou střelbu při držení
         if (_isFireInputHeld)
@@ -488,7 +528,12 @@ public class PlayerController : NetworkBehaviour
         _highestYDuringJump = transform.position.y;
 
         // --- 2. BĚŽNÉ EFEKTY DOPADU ---
-        GetComponentInChildren<PlayerSquashStretch>()?.TriggerLandSquash();
+        float landStrength = Mathf.InverseLerp(0.8f, 4.0f, fallDistance);
+
+        if (_modelMotionFX != null)
+        {
+            _modelMotionFX.TriggerLandSquash(Mathf.Lerp(1f, 1.6f, landStrength));
+        }
 
         // Spustíme VFX (prach)
         if (_playerVFX != null)
@@ -608,6 +653,133 @@ public class PlayerController : NetworkBehaviour
         {
             _animator.SetBool(_isGroundedHash, false);
         }
+    }
+
+    /// <summary>
+    /// Server zavolá tuto metodu, když chce hráči aplikovat externí pohyb.
+    /// Samotný pohyb ale provede pouze owner klient, protože PlayerController běží jen na IsOwner.
+    /// </summary>
+    public void SetExternalVelocityFromServer(Vector3 velocity, float duration)
+    {
+        if (!IsServer)
+            return;
+
+        SendExternalVelocityToOwnerClientRpc(
+            velocity,
+            Mathf.Max(0.02f, duration),
+            false,
+            CreateOwnerRpcParams()
+        );
+    }
+
+    /// <summary>
+    /// Jednorázový impulse. Vhodné pro knockback, výbuch, silný náraz.
+    /// </summary>
+    public void AddExternalImpulseFromServer(Vector3 impulseVelocity, float duration)
+    {
+        if (!IsServer)
+            return;
+
+        SendExternalVelocityToOwnerClientRpc(
+            impulseVelocity,
+            Mathf.Max(0.02f, duration),
+            true,
+            CreateOwnerRpcParams()
+        );
+    }
+
+    private ClientRpcParams CreateOwnerRpcParams()
+    {
+        return new ClientRpcParams
+        {
+            Send = new ClientRpcSendParams
+            {
+                TargetClientIds = new[] { OwnerClientId }
+            }
+        };
+    }
+
+    [ClientRpc]
+    private void SendExternalVelocityToOwnerClientRpc(
+        Vector3 velocity,
+        float duration,
+        bool additive,
+        ClientRpcParams rpcParams = default
+    )
+    {
+        if (!IsOwner)
+            return;
+
+        ApplyExternalVelocityLocal(velocity, duration, additive);
+    }
+
+    private void ApplyExternalVelocityLocal(Vector3 velocity, float duration, bool additive)
+    {
+        if (additive)
+            _externalVelocity += velocity;
+        else
+            _externalVelocity = velocity;
+
+        _externalVelocityDuration = Mathf.Max(_externalVelocityDuration, duration);
+
+        ClampExternalVelocity();
+
+        // Pokud spell zvedá hráče nahoru, nesmí ho současná pádová rychlost okamžitě přebít.
+        if (velocity.y > 0f)
+        {
+            _playerVelocity.y = Mathf.Max(_playerVelocity.y, 0f);
+
+            _isGrounded = false;
+            _lastGroundedTime = 0f;
+            _wasGroundedLastFrame = false;
+
+            if (_animator != null)
+                _animator.SetBool(_isGroundedHash, false);
+        }
+    }
+
+    private void ClampExternalVelocity()
+    {
+        Vector3 horizontal = new Vector3(_externalVelocity.x, 0f, _externalVelocity.z);
+
+        if (horizontal.magnitude > _maxExternalHorizontalSpeed)
+        {
+            horizontal = horizontal.normalized * _maxExternalHorizontalSpeed;
+            _externalVelocity.x = horizontal.x;
+            _externalVelocity.z = horizontal.z;
+        }
+
+        _externalVelocity.y = Mathf.Clamp(
+            _externalVelocity.y,
+            -_maxExternalDownSpeed,
+            _maxExternalUpSpeed
+        );
+    }
+
+    private Vector3 GetExternalMovementThisFrame()
+    {
+        if (_externalVelocity.sqrMagnitude < 0.0001f)
+            return Vector3.zero;
+
+        float deltaTime = Time.deltaTime;
+
+        if (_externalVelocityDuration > 0f)
+        {
+            _externalVelocityDuration -= deltaTime;
+        }
+        else
+        {
+            _externalVelocity = Vector3.MoveTowards(
+                _externalVelocity,
+                Vector3.zero,
+                _externalVelocityDecay * deltaTime
+            );
+        }
+
+        if (_isGrounded && _externalVelocity.y < 0f)
+            _externalVelocity.y = 0f;
+
+        return _externalVelocity * deltaTime;
     }
 
     private void OnControllerColliderHit(ControllerColliderHit hit)
@@ -773,7 +945,7 @@ public class PlayerController : NetworkBehaviour
 
                 if (IsOwner)
                 {
-                    SteamStatsManager.Instance.IncrementStat("stat_jumps_performed");
+                    SteamStatsManager.Instance.IncrementStat(SteamStatIds.JumpsPerformed);
                 }
 
                 // Vypočítáme a APLIKUJEME VÝŠKU SKOKU
@@ -783,7 +955,10 @@ public class PlayerController : NetworkBehaviour
 
                 // Spustíme animaci (pošleme přes server všem)
                 TriggerAnimationServerRpc(_jumpTriggerHash);
-                GetComponentInChildren<PlayerSquashStretch>()?.TriggerJumpSquash();
+                if (_modelMotionFX != null)
+                {
+                    _modelMotionFX.TriggerJumpSquash();
+                }
 
                 // Zvuk
                 if (IsOwner && _playerAudio != null)
@@ -910,11 +1085,6 @@ public class PlayerController : NetworkBehaviour
             _controller.Move(dodgeDirection * _dodgeSpeed * speedMultiplier * Time.deltaTime);
 
             timer += Time.deltaTime;
-
-            if (IsOwner)
-            {
-                SteamStatsManager.Instance.IncrementStat("stat_dashes_performed");
-            }
 
             yield return null; // Počkáme na další frame
         }

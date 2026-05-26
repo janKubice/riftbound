@@ -21,6 +21,7 @@ public class PlayerProgression : NetworkBehaviour
     [SerializeField] private int _startGold = 300;
     [SerializeField] private int _startEssence = 10;
     private NetworkList<int> _upgradeLevels;
+    private NetworkList<float> _upgradeExtraBonuses;
 
     // Cache pro rychlý přístup k vypočítaným hodnotám (pouze Server + Local Owner)
     private Dictionary<StatType, float> _cachedValues = new Dictionary<StatType, float>();
@@ -32,6 +33,7 @@ public class PlayerProgression : NetworkBehaviour
     private void Awake()
     {
         _upgradeLevels = new NetworkList<int>();
+        _upgradeExtraBonuses = new NetworkList<float>();
     }
 
     public override void OnNetworkSpawn()
@@ -42,6 +44,7 @@ public class PlayerProgression : NetworkBehaviour
             for (int i = 0; i < _availableUpgrades.Count; i++)
             {
                 _upgradeLevels.Add(0);
+                _upgradeExtraBonuses.Add(0f);
             }
 
             // 2. Nastavení startovních surovin (POUZE SERVER)
@@ -145,7 +148,8 @@ public class PlayerProgression : NetworkBehaviour
         {
             var data = _availableUpgrades[i];
             int level = (i < _upgradeLevels.Count) ? _upgradeLevels[i] : 0;
-            float bonus = data.GetTotalBonus(level);
+            float extraBonus = (i < _upgradeExtraBonuses.Count) ? _upgradeExtraBonuses[i] : 0f;
+            float bonus = data.GetTotalBonus(level) + extraBonus;
 
             if (_cachedValues.ContainsKey(data.Type))
                 _cachedValues[data.Type] += bonus;
@@ -246,6 +250,93 @@ public class PlayerProgression : NetworkBehaviour
             }
         }
         return false;
+    }
+
+    public int GetUpgradeIndex(StatUpgradeData data)
+    {
+        if (data == null || _availableUpgrades == null)
+            return -1;
+
+        for (int i = 0; i < _availableUpgrades.Count; i++)
+        {
+            if (_availableUpgrades[i] == data)
+                return i;
+        }
+
+        return -1;
+    }
+
+    public bool GrantRewardUpgradeServer(StatUpgradeData data, float awardedValue)
+    {
+        if (!IsServer)
+            return false;
+
+        int index = GetUpgradeIndex(data);
+
+        if (index < 0)
+            return false;
+
+        return GrantRewardUpgradeServer(index, awardedValue);
+    }
+
+    public bool GrantRewardUpgradeServer(int upgradeIndex, float awardedValue)
+    {
+        if (!IsServer)
+            return false;
+
+        if (upgradeIndex < 0 || upgradeIndex >= _availableUpgrades.Count)
+            return false;
+
+        StatUpgradeData data = _availableUpgrades[upgradeIndex];
+
+        if (data == null)
+            return false;
+
+        int currentLevel = _upgradeLevels[upgradeIndex];
+
+        if (data.IsMaxLevel(currentLevel))
+            return false;
+
+        float normalValue = data.ValuePerLevel;
+        float extraValue = awardedValue - normalValue;
+
+        _upgradeLevels[upgradeIndex] = currentLevel + 1;
+
+        if (Mathf.Abs(extraValue) > 0.001f)
+        {
+            _upgradeExtraBonuses[upgradeIndex] = _upgradeExtraBonuses[upgradeIndex] + extraValue;
+        }
+
+        ApplyInstantStatChanges(data.Type, awardedValue);
+
+        return true;
+    }
+
+    public void AddXPRewardServer(int amount)
+    {
+        if (!IsServer)
+            return;
+
+        CurrentXP.Value += Mathf.Max(0, amount);
+    }
+
+    public void AddGoldRewardServer(int amount)
+    {
+        if (!IsServer)
+            return;
+
+        Gold.Value += Mathf.Max(0, amount);
+    }
+
+    public void HealRewardServer(int amount)
+    {
+        if (!IsServer)
+            return;
+
+        PlayerAttributes attr = GetComponent<PlayerAttributes>();
+
+        if (attr != null)
+            attr.Heal(Mathf.Max(0, amount));
     }
 
     // UI Helpers

@@ -4,6 +4,7 @@ using RogueDeckCoop.Networking;
 using Steamworks;
 using System.Collections; // Nutné pro Coroutines
 using System.Collections.Generic;
+using Riftbound.UI;
 
 public class MainMenuUI : MonoBehaviour
 {
@@ -12,6 +13,7 @@ public class MainMenuUI : MonoBehaviour
     [SerializeField] private GameObject _hostPanel;
     [SerializeField] private GameObject _browserPanel;
     [SerializeField] private GameObject _passwordPanel;
+    [SerializeField] private GameObject _settingsPanel;
 
     [Header("Host Game UI")]
     [SerializeField] private TMP_InputField _lobbyNameInput;
@@ -30,6 +32,9 @@ public class MainMenuUI : MonoBehaviour
     [Header("General")]
     [SerializeField] private TextMeshProUGUI _errorText;
     [SerializeField] private float _errorDisplayTime = 5f; // Čas zobrazení chyby
+
+    [Header("Leaderboard")]
+    [SerializeField] private LeaderboardUIController _leaderboardUI;
 
     private CSteamID _pendingLobbyId;
     private readonly List<LobbyListItem> _spawnedLobbyItems = new List<LobbyListItem>();
@@ -54,7 +59,7 @@ public class MainMenuUI : MonoBehaviour
         // Kritické: Odemknout myš při návratu ze hry
         Cursor.lockState = CursorLockMode.None;
         Cursor.visible = true;
-
+        Application.targetFrameRate = 120;
         ShowPanel(_mainPanel);
 
         SteamManager.OnLobbyListUpdated += HandleLobbyListUpdated;
@@ -66,6 +71,25 @@ public class MainMenuUI : MonoBehaviour
         // UX: Vymazat chybu, když uživatel začne opravovat vstup
         _lobbyNameInput.onValueChanged.AddListener(_ => StopAndClearError(_hostErrorText, ref _hostErrorRoutine));
         _clientPasswordInput.onValueChanged.AddListener(_ => StopAndClearError(_passwordErrorText, ref _passErrorRoutine));
+
+        if (_leaderboardUI != null)
+        {
+            _leaderboardUI.OpenLeaderboard();
+        }
+        else
+        {
+            // 2. Fallback: Pokud jsi zapomněl přiřadit skript v Inspectoru, 
+            // donutíme Unity najít ho, i když je vypnutý (FindObjectsInactive.Include)
+            LeaderboardUIController ui = FindAnyObjectByType<LeaderboardUIController>(FindObjectsInactive.Include);
+            if (ui != null)
+            {
+                ui.OpenLeaderboard();
+            }
+            else
+            {
+                Debug.LogWarning("[MainMenu] LeaderboardUIController nenalezen ve scéně!");
+            }
+        }
     }
 
     private void OnDestroy()
@@ -122,6 +146,12 @@ public class MainMenuUI : MonoBehaviour
         SteamManager.Instance.RequestLobbyList();
     }
 
+    public void GoToSettings()
+    {
+        ClearAllErrors();
+        ShowPanel(_settingsPanel);
+    }
+
     /// <summary>
     /// Tato metoda se volá, když hráč klikne na "Play Arena Solo". Spustí Host-Only relaci pro Arénu.
     /// </summary>
@@ -140,6 +170,7 @@ public class MainMenuUI : MonoBehaviour
         _mainPanel.SetActive(panelToShow == _mainPanel);
         _hostPanel.SetActive(panelToShow == _hostPanel);
         _browserPanel.SetActive(panelToShow == _browserPanel);
+        _settingsPanel.SetActive(panelToShow == _settingsPanel);
         _passwordPanel.SetActive(false);
     }
 

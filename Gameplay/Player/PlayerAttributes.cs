@@ -3,6 +3,10 @@ using UnityEngine;
 using System;
 using System.Collections;
 using UnityEngine.InputSystem;
+using Riftbound.Networking.Leaderboards;
+using System.Threading.Tasks;
+using RogueDeckCoop.Networking;
+using Riftbound.UI;
 
 [RequireComponent(typeof(CharacterController))]
 public class PlayerAttributes : NetworkBehaviour
@@ -13,7 +17,7 @@ public class PlayerAttributes : NetworkBehaviour
     [SerializeField] private int _defaultMaxMana = 50;
 
     [Header("Základní Regenerace (za sekundu)")]
-    [SerializeField] private float _defaultHealthRegen = 1.0f;
+    [SerializeField] private float _defaultHealthRegen = 0.1f;
     [SerializeField] private float _defaultStaminaRegen = 10.0f;
     [SerializeField] private float _defaultManaRegen = 5.0f;
 
@@ -38,6 +42,7 @@ public class PlayerAttributes : NetworkBehaviour
     public NetworkVariable<float> StaminaRegenRate { get; private set; } =
         new NetworkVariable<float>(10f, NetworkVariableReadPermission.Everyone, NetworkVariableWritePermission.Server);
 
+    public NetworkVariable<int> MatchKills = new NetworkVariable<int>(0, NetworkVariableReadPermission.Everyone, NetworkVariableWritePermission.Server);
     private float _lastStaminaUseTime;
     [SerializeField] private float _staminaRegenDelay = 1.5f;
 
@@ -87,6 +92,7 @@ public class PlayerAttributes : NetworkBehaviour
 
             if (IsServer)
             {
+                MatchKills.Value = 0;
                 // Init hodnot ze SerializedField
                 MaxHealth.Value = _defaultMaxHealth;
                 MaxStamina.Value = _defaultMaxStamina;
@@ -196,15 +202,16 @@ public class PlayerAttributes : NetworkBehaviour
 
     private IEnumerator RegenerateAttributesRoutine()
     {
+        // Cachování pro eliminaci GC alloc v každém snímku/tiku
+        WaitForSeconds wait = new WaitForSeconds(1.0f);
+        int tickCount = 0;
+
         while (true)
         {
-            yield return new WaitForSeconds(1.0f);
+            yield return wait;
+            tickCount++;
 
-            // Zdraví
-            if (CurrentHealth.Value < MaxHealth.Value && CurrentHealth.Value > 0)
-            {
-                CurrentHealth.Value = Mathf.Min(CurrentHealth.Value + (int)HealthRegenRate.Value, MaxHealth.Value);
-            }
+            // --- TICK: 1 SEKUNDA (Mana, Stamina) ---
 
             // Stamina
             if (Time.time > _lastStaminaUseTime + _staminaRegenDelay && CurrentStamina.Value < MaxStamina.Value)
@@ -216,6 +223,17 @@ public class PlayerAttributes : NetworkBehaviour
             if (CurrentMana.Value < MaxMana.Value)
             {
                 CurrentMana.Value = Mathf.Min(CurrentMana.Value + ManaRegenRate.Value, MaxMana.Value);
+            }
+
+            // --- TICK: 5 SEKUND (Zdraví) ---
+            if (tickCount >= 5)
+            {
+                if (CurrentHealth.Value < MaxHealth.Value && CurrentHealth.Value > 0)
+                {
+                    Heal((int)HealthRegenRate.Value);
+                }
+
+                tickCount = 0; // Reset čítače po 5 sekundách
             }
         }
     }
@@ -308,8 +326,27 @@ public class PlayerAttributes : NetworkBehaviour
     [ServerRpc(RequireOwnership = false)]
     public void TakeDamageServerRpc(int amount, ulong attackerId = ulong.MaxValue)
     {
-        if (CurrentHealth.Value <= 0 || IsInvulnerable.Value) return;
-        if (attackerId != ulong.MaxValue && attackerId == OwnerClientId) return; // Ochrana proti self-damage
+        ApplyDamageServer(amount, attackerId);
+    }
+
+    public void TakeDamageFromServer(int amount, ulong attackerId = ulong.MaxValue)
+    {
+        if (!IsServer)
+            return;
+
+        ApplyDamageServer(amount, attackerId);
+    }
+
+    private void ApplyDamageServer(int amount, ulong attackerId = ulong.MaxValue)
+    {
+        if (amount <= 0)
+            return;
+
+        if (CurrentHealth.Value <= 0 || IsInvulnerable.Value)
+            return;
+
+        if (attackerId != ulong.MaxValue && attackerId == OwnerClientId)
+            return;
 
         CurrentHealth.Value -= amount;
 
@@ -322,23 +359,80 @@ public class PlayerAttributes : NetworkBehaviour
         {
             CurrentHealth.Value = 0;
 
+            if (SteamStatsManager.Instance != null && SteamStatsManager.Instance.IsSpawned)
+            {
+                SteamStatsManager.Instance.IncrementStatForClient(
+                    OwnerClientId,
+                    SteamStatIds.Deaths,
+                    1
+                );
+            }
+
             if (ArenaManager.Instance != null && ArenaManager.Instance.IsPlayerInArena(OwnerClientId))
             {
                 ArenaManager.Instance.OnPlayerDiedInArena(OwnerClientId);
 
-                // Reset atributů pro stav v lobby
                 CurrentHealth.Value = MaxHealth.Value;
                 CurrentStamina.Value = MaxStamina.Value;
                 CurrentMana.Value = MaxMana.Value;
             }
             else
             {
-                // ZMĚNA: Upozorníme klienta, že zemřel, aby si ukázal End Screen
-                NotifyDeathClientRpc(OwnerClientId);
+                // --- FÁZE 3: Získání skóre a odeslání požadavku na hráče ---
+                int finalKills = MatchKills.Value;
+                int timeSurvivedSeconds = 0;
 
-                // Původní respawn můžeš zakomentovat, pokud pro demo znamená smrt = konec
-                // Respawn(); 
+                // Převedeme minuty ze Spawneru na sekundy
+                if (DirectorSpawner.Instance != null)
+                {
+                    timeSurvivedSeconds = Mathf.FloorToInt(DirectorSpawner.Instance.GetRunTimeMinutes() * 60f);
+                }
+
+                ClientRpcParams rpcParams = new ClientRpcParams
+                {
+                    Send = new ClientRpcSendParams { TargetClientIds = new ulong[] { OwnerClientId } }
+                };
+                OnPlayerDeathLeaderboardClientRpc(finalKills, timeSurvivedSeconds, rpcParams);
+
+                // ----------------------------------------------------------------------
+
+                // Obnovíme zdraví, aby hráč v lobby neležel mrtvý
+                CurrentHealth.Value = MaxHealth.Value;
+                NotifyDeathClientRpc(OwnerClientId);
             }
+        }
+    }
+
+    [ClientRpc]
+    private void OnPlayerDeathLeaderboardClientRpc(int matchKills, int timeSurvived, ClientRpcParams rpcParams = default)
+    {
+        Debug.Log($"[Client] Zemřel jsem. Zkouším odeslat skóre na Steam: {matchKills} killů, {timeSurvived} sekund.");
+        _ = ProcessLeaderboardsAsync(matchKills, timeSurvived);
+    }
+
+    private async Task ProcessLeaderboardsAsync(int matchKills, int timeSurvived)
+    {
+        try
+        {
+            // (TVŮJ STÁVAJÍCÍ KÓD PRO UPLOAD)
+            await SteamLeaderboardManager.Instance.UploadScoreAsync(LeaderboardType.Kills, matchKills);
+            await SteamLeaderboardManager.Instance.UploadScoreAsync(LeaderboardType.TimeSurvived, timeSurvived);
+
+            // 2. Nalezení vypnuté tabulky ve scéně
+            LeaderboardUIController ui = FindAnyObjectByType<LeaderboardUIController>(FindObjectsInactive.Include);
+
+            if (ui != null)
+            {
+                ui.OpenLeaderboard(); // Toto tabulku zapne a začne stahovat data
+            }
+            else
+            {
+                Debug.LogWarning("[Leaderboard] Tabulka nenalezena ve scéně Arény! Máš vložený prefab do Canvasu?");
+            }
+        }
+        catch (System.Exception ex)
+        {
+            Debug.LogError($"[Leaderboard] CHYBA: {ex.Message}");
         }
     }
 
@@ -351,6 +445,10 @@ public class PlayerAttributes : NetworkBehaviour
             if (EndScreenUI.Instance != null)
             {
                 EndScreenUI.Instance.Show("YOU DIED", "Thanks for playing the demo!\nTry again and do better.");
+                if (NetworkManager.Singleton != null && NetworkManager.Singleton.ConnectedClientsIds.Count == 1)
+                {
+                    Time.timeScale = 0f; // Zastavit čas v singleplayeru
+                }
             }
         }
     }
@@ -429,6 +527,13 @@ public class PlayerAttributes : NetworkBehaviour
         //    Stamina = CurrentStamina.Value 
         // });
     }
+
+    public void AddKill()
+    {
+        if (IsServer) MatchKills.Value++;
+    }
+
+
 
     // --- Debug / Input Test ---
     private void Update()

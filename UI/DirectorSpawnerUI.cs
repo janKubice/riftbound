@@ -5,76 +5,202 @@ public class DirectorSpawnerUI : MonoBehaviour
 {
     [Header("General UI")]
     [SerializeField] private TextMeshProUGUI _difficultyText;
+    [SerializeField] private TextMeshProUGUI _runTimeText;
+    [SerializeField] private TextMeshProUGUI _phaseText;
+    [SerializeField] private TextMeshProUGUI _pressureText;
+    [SerializeField] private TextMeshProUGUI _aliveEnemiesText;
+    [SerializeField] private TextMeshProUGUI _spawnRateText;
 
-    [Header("Wave UI (Arena Only)")]
-    [SerializeField] private GameObject _wavePanel; // Obalový objekt pro zobrazení/skrytí vlnového UI
+    [Header("Wave UI")]
+    [SerializeField] private GameObject _wavePanel;
     [SerializeField] private TextMeshProUGUI _waveNumberText;
     [SerializeField] private TextMeshProUGUI _enemiesRemainingText;
 
+    [Header("Options")]
+    [SerializeField] private bool _showContinuousPanel = true;
+    [SerializeField] private bool _showWavePanel = true;
+    [SerializeField] private bool _hideWhenNoSpawner = true;
+
     private void Update()
     {
-        if (DirectorSpawner.Instance == null) return;
+        DirectorSpawner spawner = DirectorSpawner.Instance;
 
-        // Aktualizace základní obtížnosti
-        if (_difficultyText != null)
+        if (spawner == null)
         {
-            _difficultyText.text = $"Difficulty: <color=red>{DirectorSpawner.Instance.CurrentDifficultyPercent.Value}%</color>";
+            if (_hideWhenNoSpawner)
+            {
+                SetActiveSafe(_wavePanel, false);
+            }
+
+            return;
         }
 
-        // Pokud je aktivní mód vln, řešíme Wave UI
-        if (DirectorSpawner.Instance.CurrentMode == DirectorSpawner.SpawnerMode.Wave)
-        {
-            if (_wavePanel != null && !_wavePanel.activeSelf) _wavePanel.SetActive(true);
+        UpdateGeneralUI(spawner);
 
-            UpdateWaveUI();
+        if (spawner.CurrentMode == DirectorSpawner.SpawnerMode.Wave)
+        {
+            SetActiveSafe(_wavePanel, _showWavePanel);
+
+            UpdateWaveUI(spawner);
         }
         else
         {
-            // V klasickém Continuous režimu vlnové UI skryjeme
-            if (_wavePanel != null && _wavePanel.activeSelf) _wavePanel.SetActive(false);
+            SetActiveSafe(_wavePanel, true);
+
+            UpdateContinuousUI(spawner);
+        }
+
+        _wavePanel.SetActive(_showWavePanel);
+    }
+
+    private void UpdateGeneralUI(DirectorSpawner spawner)
+    {
+        if (_difficultyText != null)
+        {
+            int difficulty = spawner.CurrentDifficultyPercent.Value;
+            string color = difficulty switch
+            {
+                >= 250 => "#FF4040",
+                >= 175 => "#FF9A3D",
+                >= 125 => "#FFD166",
+                _ => "#FFFFFF"
+            };
+
+            _difficultyText.text = $"Difficulty: <color={color}>{difficulty}%</color>";
+        }
+
+        if (_runTimeText != null)
+        {
+            int seconds = spawner.RunTimeSecondsNetVar.Value;
+            int minutes = seconds / 60;
+            int restSeconds = seconds % 60;
+
+            _runTimeText.text = $"Time: {minutes:00}:{restSeconds:00}";
+        }
+
+        if (_phaseText != null)
+        {
+            RunPhaseType phaseType = (RunPhaseType)spawner.CurrentPhaseTypeNetVar.Value;
+            string label = GetPhaseLabel(phaseType);
+            string color = GetPhaseColor(phaseType);
+
+            _phaseText.text = $"Phase: <color={color}>{label}</color>";
+        }
+
+        if (_pressureText != null)
+        {
+            int pressure = spawner.CurrentPressurePercentNetVar.Value;
+            string color = pressure switch
+            {
+                >= 180 => "#FF4040",
+                >= 130 => "#FF9A3D",
+                >= 100 => "#FFD166",
+                _ => "#90E090"
+            };
+
+            _pressureText.text = $"Pressure: <color={color}>{pressure}%</color>";
         }
     }
 
-    private void UpdateWaveUI()
+    private void UpdateContinuousUI(DirectorSpawner spawner)
     {
-        int currentWave = DirectorSpawner.Instance.CurrentWaveNetVar.Value;
-        bool isWaveActive = DirectorSpawner.Instance.IsWaveActiveNetVar.Value;
-        float countdown = DirectorSpawner.Instance.WaveCountdownNetVar.Value;
+        if (_aliveEnemiesText != null)
+        {
+            int alive = spawner.EnemiesAliveNetVar.Value;
+            int max = spawner.CurrentMaxEnemiesNetVar.Value;
 
-        // 1. STAV: Čekání na další vlnu (Odpočet)
+            if (max > 0)
+                _aliveEnemiesText.text = $"Enemies: {alive}/{max}";
+            else
+                _aliveEnemiesText.text = $"Enemies: {alive}";
+        }
+
+        if (_spawnRateText != null)
+        {
+            float spawnRate = spawner.CurrentSpawnRatePerSecondNetVar.Value;
+            _spawnRateText.text = $"Spawn Rate: {spawnRate:0.0}/s";
+        }
+    }
+
+    private void UpdateWaveUI(DirectorSpawner spawner)
+    {
+        if (_waveNumberText == null || _enemiesRemainingText == null)
+            return;
+
+        int currentWave = spawner.CurrentWaveNetVar.Value;
+        bool isWaveActive = spawner.IsWaveActiveNetVar.Value;
+        float countdown = spawner.WaveCountdownNetVar.Value;
+
         if (!isWaveActive && countdown > 0)
         {
-            _waveNumberText.text = currentWave == 0 ? "PREPARE" : $"WAVE {currentWave} CLEARED";
+            _waveNumberText.text = currentWave == 0
+                ? "PREPARE"
+                : $"WAVE {currentWave} CLEARED";
 
-            // Barevný přechod odpočtu: nad 3s bílá, pod 3s žlutá, pod 1.5s červená
             string colorHex = countdown switch
             {
-                < 1.5f => "red",
-                < 3.0f => "yellow",
-                _ => "white"
+                < 1.5f => "#FF4040",
+                < 3.0f => "#FFD166",
+                _ => "#FFFFFF"
             };
 
             _enemiesRemainingText.text = $"Next wave in: <color={colorHex}>{countdown:F1}s</color>";
         }
-        // 2. STAV: Probíhající vlna
         else if (isWaveActive)
         {
             _waveNumberText.text = $"<color=#FFA500>WAVE {currentWave}</color>";
 
-            int alive = DirectorSpawner.Instance.EnemiesAliveNetVar.Value;
-            int yetToSpawn = DirectorSpawner.Instance.EnemiesYetToSpawnNetVar.Value;
+            int alive = spawner.EnemiesAliveNetVar.Value;
+            int yetToSpawn = spawner.EnemiesYetToSpawnNetVar.Value;
             int totalRemaining = alive + yetToSpawn;
-            int totalWaveSize = DirectorSpawner.Instance.TotalWaveEnemiesNetVar.Value;
+            int totalWaveSize = Mathf.Max(1, spawner.TotalWaveEnemiesNetVar.Value);
 
-            // Procentuální vyjádření postupu vlny
             float progress = 1f - ((float)totalRemaining / totalWaveSize);
-            _enemiesRemainingText.text = $"Enemies: {totalRemaining} <size=80%>(Done: {progress:P0})</size>";
+            progress = Mathf.Clamp01(progress);
+
+            _enemiesRemainingText.text =
+                $"Enemies: {totalRemaining} <size=80%>(Done: {progress:P0})</size>";
         }
-        // 3. STAV: Úvodní inicializace nebo vítězství
         else
         {
             _waveNumberText.text = "READY?";
             _enemiesRemainingText.text = "Waiting for players...";
         }
+    }
+
+    private static void SetActiveSafe(GameObject obj, bool active)
+    {
+        if (obj != null && obj.activeSelf != active)
+            obj.SetActive(active);
+    }
+
+    private static string GetPhaseLabel(RunPhaseType type)
+    {
+        return type switch
+        {
+            RunPhaseType.Warmup => "Warmup",
+            RunPhaseType.BuildUp => "Build Up",
+            RunPhaseType.Pressure => "Pressure",
+            RunPhaseType.Spike => "Spike",
+            RunPhaseType.Breather => "Breather",
+            RunPhaseType.EliteMoment => "Elite",
+            RunPhaseType.BossMoment => "Boss",
+            _ => type.ToString()
+        };
+    }
+
+    private static string GetPhaseColor(RunPhaseType type)
+    {
+        return type switch
+        {
+            RunPhaseType.Warmup => "#A8E6A3",
+            RunPhaseType.BuildUp => "#FFFFFF",
+            RunPhaseType.Pressure => "#FFD166",
+            RunPhaseType.Spike => "#FF6B4A",
+            RunPhaseType.Breather => "#7DDCFF",
+            RunPhaseType.EliteMoment => "#C77DFF",
+            RunPhaseType.BossMoment => "#FF4040",
+            _ => "#FFFFFF"
+        };
     }
 }

@@ -1,54 +1,92 @@
 using UnityEngine;
 using TMPro;
-using System.Collections;
 
 public class ResourceUI : MonoBehaviour
 {
     [Header("UI References")]
     [SerializeField] private TextMeshProUGUI _xpText;
     [SerializeField] private TextMeshProUGUI _goldText;
-    [SerializeField] private TextMeshProUGUI _essenceText;
 
-    // Cache pro komponentu, abychom nevolali GetComponent při každé změně
     private PlayerProgression _cachedProgression;
 
-    private void Start()
+    private int _lastXp = -1;
+    private int _lastGold = -1;
+    private int _lastEssence = -1;
+
+    private void OnEnable()
     {
-        StartCoroutine(WaitForPlayer());
+        // Pokud instance už existuje, inicializujeme ihned
+        if (PlayerAttributes.LocalInstance != null)
+        {
+            Initialize(PlayerAttributes.LocalInstance);
+        }
+        else
+        {
+            // Fallback: Pokud hráč ještě není, musíme se přihlásit k eventu jeho vytvoření
+            // Předpokládám existenci statického eventu v PlayerAttributes, což je best practice
+            // Pokud ho nemáte, použijte Update check (viz níže)
+        }
     }
 
-    private void OnDestroy()
+    private void Update()
     {
-        // Správný úklid eventů
+        // Pokud nemáme referenci, zkusíme ji získat (náhrada za korutinu bez overheadu IEnumeratoru)
+        if (_cachedProgression == null && PlayerAttributes.LocalInstance != null)
+        {
+            Initialize(PlayerAttributes.LocalInstance);
+        }
+    }
+
+    private void Initialize(PlayerAttributes player)
+    {
+        _cachedProgression = player.GetComponent<PlayerProgression>();
+
+        if (_cachedProgression != null)
+        {
+            // Prevence duplicitního odběru
+            _cachedProgression.OnResourcesChanged -= UpdateUI;
+            _cachedProgression.OnResourcesChanged += UpdateUI;
+            ForceUpdateUI();
+        }
+    }
+
+    private void OnDisable()
+    {
         if (_cachedProgression != null)
         {
             _cachedProgression.OnResourcesChanged -= UpdateUI;
         }
     }
 
-    private IEnumerator WaitForPlayer()
-    {
-        yield return new WaitUntil(() => PlayerAttributes.LocalInstance != null);
-
-        // Cachujeme referenci
-        _cachedProgression = PlayerAttributes.LocalInstance.GetComponent<PlayerProgression>();
-
-        if (_cachedProgression != null)
-        {
-            _cachedProgression.OnResourcesChanged += UpdateUI;
-            UpdateUI(); // Prvotní refresh
-        }
-    }
-
-    private void UpdateUI()
+    public void UpdateUI()
     {
         if (_cachedProgression == null) return;
 
-        // Varianta 1: String Interpolation (nejčitelnější, alokuje string)
-        _xpText.SetText($"{_cachedProgression.CurrentXP.Value:N0} <color=#AAAAAA>XP</color>");
+        // XP
+        int currentXp = _cachedProgression.CurrentXP.Value;
+        if (_lastXp != currentXp)
+        {
+            _lastXp = currentXp;
+            _xpText.SetText($"{_lastXp:N0} <color=#AAAAAA>XP</color>");
+        }
 
-        _goldText.SetText($"{_cachedProgression.Gold.Value:N0} <color=#FFD700>G</color>");
+        // Gold
+        int currentGold = _cachedProgression.Gold.Value;
+        if (_lastGold != currentGold)
+        {
+            _lastGold = currentGold;
+            _goldText.SetText($"{_lastGold:N0} <color=#FFD700>G</color>");
+        }
 
-        _essenceText.SetText($"{_cachedProgression.Essence.Value:N0} <color=#00FFFF>E</color>");
+
+    }
+
+    [ContextMenu("Force Update")]
+    public void ForceUpdateUI()
+    {
+        _lastXp = -1;
+        _lastGold = -1;
+        _lastEssence = -1;
+        UpdateUI();
     }
 }

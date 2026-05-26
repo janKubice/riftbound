@@ -5,9 +5,8 @@ using System.Collections.Generic;
 
 public class EnemyHealth : NetworkBehaviour
 {
-    [SerializeField] private int _maxHealth = 30;
-    private int _baseMaxHealth;
-    [SerializeField] private bool _isTrainingDummy = false;
+    EnemyDefinition _definition;
+    [Header("Settings")]
     private StatusEffectReceiver _statusReceiver;
     public NetworkVariable<int> CurrentHealth = new NetworkVariable<int>(30);
     private Rigidbody _rb;
@@ -18,32 +17,21 @@ public class EnemyHealth : NetworkBehaviour
     // Eventy
     public event Action OnDeath;
     public event Action<int> OnDamageTaken;
-    private EnemyTier _currentTier = EnemyTier.Normal;
+    private EnemyTier _currentTier;
 
-    [Header("Loot")]
-    [SerializeField] private LootTable _lootTable;
-    [Range(0f, 1f)][SerializeField] private float _lootChance = 0.3f;
 
     [Header("Audio")]
-    [SerializeField] private int _hurtSoundIndex = 0;
-    [SerializeField] private int _deathSoundIndex = 1;
     private NetworkedAudioSource _netAudio;
     private ulong _lastAttackerId = 9999;
 
-    [Header("VFX")]
-    [Tooltip("Prefab částicového efektu (Particle System) přehráný při smrti.")]
-    [SerializeField] private GameObject _deathVFXPrefab;
-
-    [Header("Gore System")]
-    [Tooltip("Seznam prefabů kousků těla (hlava, ruka, kosti). Každý prefab musí mít Rigidbody a Collider.")]
-    [SerializeField] private List<GameObject> _gorePrefabs = new List<GameObject>();
     private bool _isExplosiveKill = false;
     private Vector3 _explosionCenter;
     private float _explosionForce;
     private float _explosionRadius;
     private bool _isDead = false;
 
-    public int MaxHealth => _baseMaxHealth > 0 ? _baseMaxHealth : _maxHealth;
+    private int _currentMaxHealth;
+    public int MaxHealth => _currentMaxHealth;
     public bool IsInjured => CurrentHealth.Value < MaxHealth;
 
     private void Awake()
@@ -51,16 +39,10 @@ public class EnemyHealth : NetworkBehaviour
         _rb = GetComponent<Rigidbody>();
         _statusReceiver = GetComponent<StatusEffectReceiver>();
         _netAudio = GetComponent<NetworkedAudioSource>();
-        _baseMaxHealth = _maxHealth;
     }
 
     public override void OnNetworkSpawn()
     {
-        if (IsServer)
-        {
-            CurrentHealth.Value = _isTrainingDummy ? 999999 : _maxHealth;
-        }
-
         // 1. Znovu zapnout všechny collidery
         Collider[] allColliders = GetComponentsInChildren<Collider>();
         foreach (var col in allColliders)
@@ -127,21 +109,44 @@ public class EnemyHealth : NetworkBehaviour
             return;
         }
 
-        if (!_isTrainingDummy && CurrentHealth.Value <= 0) return;
+        if (!_definition._isTrainingDummy && CurrentHealth.Value <= 0) return;
 
         int finalDamage = amount;
+        PlayerAttributes attackerAttributes = null;
         // Pokud útočník je hráč, aplikujeme jeho bonusy na serveru
         if (NetworkManager.Singleton.ConnectedClients.TryGetValue(attackerId, out var client))
         {
+            attackerAttributes = client.PlayerObject.GetComponent<PlayerAttributes>();
             var playerProg = client.PlayerObject.GetComponent<PlayerProgression>();
             if (playerProg != null)
             {
-                finalDamage = (int)(amount * playerProg.GetStatMultiplier(StatType.DamageMultiplier));
+                finalDamage = (int)(amount * playerProg.GetStatMultiplier(StatType.DamageMultiplier, 1f));
             }
         }
 
         CurrentHealth.Value -= finalDamage;
         _lastAttackerId = attackerId;
+
+
+        // --- IMPLEMENTACE LIFE STEALU (VAMPIRISM) ---
+        if (attackerAttributes != null && client != null)
+        {
+            var playerProg = client.PlayerObject.GetComponent<PlayerProgression>();
+            if (playerProg != null)
+            {
+                // Získání procentuální hodnoty Life Stealu (např. 0.05 pro 5%)
+                float lifeStealPct = playerProg.GetStatBonus(StatType.LifeSteal);
+
+                if (lifeStealPct > 0f)
+                {
+                    int healAmount = Mathf.RoundToInt(finalDamage * lifeStealPct);
+                    if (healAmount > 0)
+                    {
+                        attackerAttributes.Heal(healAmount);
+                    }
+                }
+            }
+        }
 
         if (attackerId != 9999 && SteamStatsManager.Instance != null && SteamStatsManager.Instance.IsSpawned) // PŘIDÁNO IsSpawned
         {
@@ -150,18 +155,22 @@ public class EnemyHealth : NetworkBehaviour
                 Send = new ClientRpcSendParams { TargetClientIds = new ulong[] { attackerId } }
             };
 
-            SteamStatsManager.Instance.IncrementStatClientRpc("stat_total_damage", amount, clientParams);
+            SteamStatsManager.Instance.IncrementStatClientRpc(
+                SteamStatIds.TotalDamage,
+                finalDamage,
+                clientParams
+            );
         }
 
         // Vizuální čísla (spawnuje server, NetworkTransform se postará o zbytek, nebo ClientRpc v Manažerovi)
         if (DamageNumberManager.Instance != null)
         {
-            DamageNumberManager.Instance.SpawnDamageNumber(transform.position, amount, false);
+            DamageNumberManager.Instance.SpawnDamageNumber(transform.position, amount, PopupType.Damage);
         }
 
         // Zvuk
         if (_netAudio != null)
-            _netAudio.PlayOneShotNetworked(_hurtSoundIndex);
+            _netAudio.PlayOneShotLocal(_definition.HitSfx);
 
         // Eventy (zavolají se na serveru, pokud potřebuješ reakci u klienta, použij OnValueChanged na NetworkVariable nebo ClientRpc)
         OnDamageTaken?.Invoke(amount);
@@ -169,7 +178,7 @@ public class EnemyHealth : NetworkBehaviour
         // LOGIKA SMRTI
         if (CurrentHealth.Value <= 0)
         {
-            if (_isTrainingDummy)
+            if (_definition._isTrainingDummy)
             {
                 CurrentHealth.Value = 999999;
             }
@@ -186,6 +195,22 @@ public class EnemyHealth : NetworkBehaviour
                     Die();
                 }
             }
+        }
+    }
+
+    /// <summary>
+    /// Vyléčí nepřítele (běží POUZE na Serveru)
+    /// </summary>
+    public void Heal(int amount)
+    {
+        if (!IsServer || _isDead) return;
+
+        // Přidáme HP, ale nesmíme přesáhnout MaxHealth
+        CurrentHealth.Value = Mathf.Min(CurrentHealth.Value + amount, MaxHealth);
+
+        if (DamageNumberManager.Instance != null)
+        {
+            DamageNumberManager.Instance.SpawnDamageNumber(transform.position, amount, PopupType.Heal);
         }
     }
 
@@ -214,10 +239,12 @@ public class EnemyHealth : NetworkBehaviour
         TakeExplosiveDamage(amount, expCenter, expForce, expRadius, attackerId);
     }
 
-    public void InitializeHealth(int maxHp)
+    public void InitializeHealth(EnemyDefinition def, EnemyTier tier, int maxHp)
     {
         if (!IsServer) return;
-        _maxHealth = maxHp;
+        _definition = def;
+        _currentTier = tier;
+        _currentMaxHealth = maxHp;
         CurrentHealth.Value = maxHp;
 
         // 1. Znovu zapnout všechny collidery
@@ -232,6 +259,8 @@ public class EnemyHealth : NetworkBehaviour
         {
             _rb.isKinematic = false;
         }
+
+
 
         // 3. Reset nesmrtelnosti (pro jistotu)
         IsInvulnerable = false;
@@ -274,21 +303,59 @@ public class EnemyHealth : NetworkBehaviour
 
     private void PerformSharedDeathLogic()
     {
+        if (IsServer && _lastAttackerId != 9999)
+        {
+            if (NetworkManager.Singleton.ConnectedClients.TryGetValue(_lastAttackerId, out var client))
+            {
+                if (client.PlayerObject != null && client.PlayerObject.TryGetComponent(out PlayerAttributes playerAttr))
+                {
+                    playerAttr.AddKill();
+                    if (SteamStatsManager.Instance != null && SteamStatsManager.Instance.IsSpawned)
+                    {
+                        SteamStatsManager.Instance.IncrementStatForClient(
+                            _lastAttackerId,
+                            SteamStatIds.TotalKills,
+                            1
+                        );
+
+                        switch (_currentTier)
+                        {
+                            case EnemyTier.Elite:
+                                SteamStatsManager.Instance.IncrementStatForClient(
+                                    _lastAttackerId,
+                                    SteamStatIds.EliteKills,
+                                    1
+                                );
+                                break;
+
+                            case EnemyTier.Champion:
+                                SteamStatsManager.Instance.IncrementStatForClient(
+                                    _lastAttackerId,
+                                    SteamStatIds.ChampionKills,
+                                    1
+                                );
+                                break;
+                        }
+                    }
+                }
+            }
+        }
+
         OnDeath?.Invoke();
 
         if (_netAudio != null)
-            _netAudio.PlayOneShotNetworked(_deathSoundIndex);
+            _netAudio.PlayOneShotLocal(_definition.DeathSfx);
 
         if (IsServer && DirectorSpawner.Instance != null)
         {
             DirectorSpawner.Instance.EnemyDied();
         }
 
-        if (IsServer && _lootTable != null && LootManager.Instance != null)
+        if (IsServer && _definition._lootTable != null && LootManager.Instance != null)
         {
             int dropRolls = 1;
             float chanceMultiplier = 1.0f;
-            float fortuneBonus = 0f;
+            float luckBonus = 0f;
             float expMultiplier = 1f;
             float tierAmountMultiplier = 1f; // Přidáno pro škálování hodnoty lootu
 
@@ -298,8 +365,11 @@ public class EnemyHealth : NetworkBehaviour
                 var playerProg = client.PlayerObject.GetComponent<PlayerProgression>();
                 if (playerProg != null)
                 {
-                    fortuneBonus = playerProg.GetStatBonus(StatType.Luck);
-                    expMultiplier = 1 + playerProg.GetStatBonus(StatType.ExperienceGain);
+                    // Vrací např. 0.15f (což znamená 15 %)
+                    luckBonus = playerProg.GetStatBonus(StatType.Luck);
+
+                    // Vrací 1.0f + 0.15f = 1.15f (násobič celkového XP)
+                    expMultiplier = 1f + playerProg.GetStatBonus(StatType.ExperienceGain);
                 }
             }
 
@@ -315,12 +385,27 @@ public class EnemyHealth : NetworkBehaviour
                     dropRolls = 5; chanceMultiplier = 10.0f; tierAmountMultiplier = 5.0f; break;
             }
 
-            float finalChance = (_lootChance * chanceMultiplier) + fortuneBonus;
-            int finalRolls = dropRolls + (int)(fortuneBonus * 2);
+            // 1. Šance na drop
+            // Zde je zvolen multiplikativní přístup (bezpečnější pro balancování). 
+            // Např. základní šance 10 % (0.1) a Luck 15 % (0.15) = 0.1 * 1.15 = 11.5 % šance.
+            // (Pokud chceš aditivní přístup, použij: finalChance = (_definition._lootChance * chanceMultiplier) + luckBonus;)
+            float finalChance = _definition._lootChance * chanceMultiplier * (1f + luckBonus);
 
-            // Výpočet finálního násobiče (hráčský bonus * tier bonus)
+            // 2. Počet pokusů o drop (Extra rolls z Lucku)
+            // FloorToInt zajistí garantované rolly (např. Luck 120 % = garantovaný 1 extra roll navíc)
+            int guaranteedExtraRolls = Mathf.FloorToInt(luckBonus);
+            int finalRolls = dropRolls + guaranteedExtraRolls;
+
+            // Zbytek po dělení (např. u 120 % zbyde 0.20) se použije jako pravděpodobnost na další roll
+            if (UnityEngine.Random.value < (luckBonus % 1f))
+            {
+                finalRolls++;
+            }
+
+            // 3. Modifikátor objemu lootu (Pro XP/Gold, který se předá do LootTable)
             float finalAmountMultiplier = expMultiplier * tierAmountMultiplier;
 
+            // Generování lootu
             for (int i = 0; i < finalRolls; i++)
             {
                 if (UnityEngine.Random.value < finalChance)
@@ -331,8 +416,7 @@ public class EnemyHealth : NetworkBehaviour
                         UnityEngine.Random.Range(-0.5f, 0.5f)
                     );
 
-                    // Použití finalAmountMultiplier
-                    LootManager.Instance.SpawnLoot(transform.position + randomOffset, _lootTable, finalAmountMultiplier);
+                    LootManager.Instance.SpawnLoot(transform.position + randomOffset, _definition._lootTable, finalAmountMultiplier);
                 }
             }
         }
@@ -377,24 +461,24 @@ public class EnemyHealth : NetworkBehaviour
     private void SpawnGorePrefabsClientRpc(Vector3 pos, bool isExplosion, Vector3 expCenter, float expForce, float expRadius)
     {
         // Pokud nemáme nastavené žádné části, ignorujeme
-        if (_gorePrefabs == null || _gorePrefabs.Count == 0) return;
+        if (_definition.GorePrefabs == null || _definition.GorePrefabs.Length == 0) return;
 
-        if (_deathVFXPrefab != null)
+        if (_definition.DeathVFX == null)
         {
             // Instanciace lokálního ne-síťového objektu
-            GameObject vfx = Instantiate(_deathVFXPrefab, pos, Quaternion.identity);
+            GameObject vfx = Instantiate(_definition.DeathVFX, pos, Quaternion.identity);
 
             // Pojistka pro smazání objektu, pokud particle system nemá nastaveno "Stop Action: Destroy"
             Destroy(vfx, 5f);
         }
 
         // Náhodně určíme, kolik kusů (1 až VŠECHNY) z nepřítele vypadne
-        int countToSpawn = UnityEngine.Random.Range(1, _gorePrefabs.Count + 1);
+        int countToSpawn = UnityEngine.Random.Range(1, _definition.GorePrefabs.Length + 1);
 
         for (int i = 0; i < countToSpawn; i++)
         {
             // Vybereme náhodný prefab z listu pro každý kus
-            GameObject prefab = _gorePrefabs[UnityEngine.Random.Range(0, _gorePrefabs.Count)];
+            GameObject prefab = _definition.GorePrefabs[UnityEngine.Random.Range(0, _definition.GorePrefabs.Length)];
 
             // Mírný rozptyl pozice (aby se nespawnuly přesně v sobě a neexplodovaly o sebe chybou fyziky)
             Vector3 spawnOffset = new Vector3(

@@ -136,18 +136,28 @@ public class NetworkedAudioSource : NetworkBehaviour
     /// <param name="clipIndex">Index zvuku z pole _oneShotClips</param>
     public void PlayOneShotNetworked(int clipIndex)
     {
-        // Ověření indexu
         if (clipIndex < 0 || clipIndex >= _oneShotClips.Length || _oneShotClips[clipIndex] == null)
         {
             Debug.LogWarning($"NetworkedAudioSource: Neplatný index zvuku {clipIndex}");
             return;
         }
 
-        // Klient žádá server, aby přehrál zvuk.
-        // Nevyžadujeme vlastnictví (RequireOwnership = false), protože hráč může interagovat
-        // s objektem (dveře), který nevlastní. Server by měl mít vlastní logiku
-        // pro ověření, zda je interakce platná.
-        PlayOneShotServerRpc(clipIndex);
+        if (IsServer)
+        {
+            PlayOneShotClientRpc(clipIndex);
+        }
+        else
+        {
+            PlayOneShotServerRpc(clipIndex);
+        }
+    }
+
+    public void PlayOneShotLocal(AudioClip clip, float volume = 1f)
+    {
+        if (clip == null || _audioSource == null)
+            return;
+
+        _audioSource.PlayOneShot(clip, volume);
     }
 
     [ServerRpc(RequireOwnership = false)]

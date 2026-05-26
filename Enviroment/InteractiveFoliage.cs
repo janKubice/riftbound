@@ -1,49 +1,59 @@
 using UnityEngine;
-using System.Collections;
 
 public class InteractiveFoliage : MonoBehaviour
 {
     [Header("Reakce")]
-    [SerializeField] private ParticleSystem _leafParticles; // Přetáhni sem particle efekt listí
-    [SerializeField] private float _shakeAmount = 5.0f;     // Síla zatřesení
-    [SerializeField] private float _shakeRecovery = 10.0f;  // Rychlost návratu
+    [SerializeField] private ParticleSystem _leafParticles;
+    [SerializeField] private float _shakeAmount = 5.0f;
+    [SerializeField] private float _shakeRecovery = 10.0f;
+    [SerializeField] private float _stopThreshold = 0.001f;
 
     private Quaternion _originalRot;
-    private Vector3 _currentShakeVelocity;
-    private Vector3 _shakeOffset; // Aktuální vychýlení
+    private Vector3 _shakeOffset;
 
     private void Awake()
     {
         _originalRot = transform.localRotation;
+
+        // Vypne Update, dokud někdo nezavolá OnHit.
+        enabled = false;
     }
 
     private void Update()
     {
-        // Procedurální návrat do původní polohy (pružina)
-        if (_shakeOffset.sqrMagnitude > 0.001f)
+        _shakeOffset = Vector3.Lerp(
+            _shakeOffset,
+            Vector3.zero,
+            Time.deltaTime * _shakeRecovery
+        );
+
+        transform.localRotation = _originalRot * Quaternion.Euler(_shakeOffset);
+
+        if (_shakeOffset.sqrMagnitude <= _stopThreshold)
         {
-            // Lerp zpět k nule
-            _shakeOffset = Vector3.Lerp(_shakeOffset, Vector3.zero, Time.deltaTime * _shakeRecovery);
-            
-            // Aplikace rotace
-            transform.localRotation = _originalRot * Quaternion.Euler(_shakeOffset);
+            _shakeOffset = Vector3.zero;
+            transform.localRotation = _originalRot;
+
+            // Update už není potřeba.
+            enabled = false;
         }
     }
 
-    // Tuto metodu zavoláme při zásahu
     public void OnHit(Vector3 hitDirection)
     {
-        // 1. Spustit Particles (Listí)
         if (_leafParticles != null)
         {
             _leafParticles.Play();
         }
 
-        // 2. Vypočítat směr výkyvu (strom se nakloní ve směru úderu)
-        // Zjednodušeně: Úder zepředu (Z) způsobí rotaci kolem X.
         float intensity = Random.Range(0.8f, 1.2f);
-        
-        // Jednoduchý "impuls" do rotace
-        _shakeOffset = new Vector3(hitDirection.z, 0, -hitDirection.x) * _shakeAmount * intensity;
+
+        _shakeOffset = new Vector3(
+            hitDirection.z,
+            0f,
+            -hitDirection.x
+        ) * _shakeAmount * intensity;
+
+        enabled = true;
     }
 }

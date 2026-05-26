@@ -1,6 +1,6 @@
 using UnityEngine;
 
-[CreateAssetMenu(menuName = "Riftbound/Progression/Stat Upgrade Data")]
+[CreateAssetMenu(menuName = "Riftbound/Progression/StatUpgradeData")]
 public class StatUpgradeData : ScriptableObject
 {
     [Header("Identifikace")]
@@ -16,9 +16,9 @@ public class StatUpgradeData : ScriptableObject
     public float CostMultiplier = 1.5f;  // Jak moc se zdraží další level (100 -> 150 -> 225...)
 
     [Header("Hodnoty")]
-    public float BaseValue = 0f;         // Základní hodnota (pokud chceme přepsat default)
+    public float BaseValue = 0f;         // Základní hodnota
     public float ValuePerLevel = 10f;    // O kolik se zvedne stat za každý nákup
-
+    public bool IsPercentage = false;    // Určuje, zda se jedná o % (např. 0.02 = 2%)
 
     [Header("Limity")]
     public int MaxLevel = 10;
@@ -26,7 +26,6 @@ public class StatUpgradeData : ScriptableObject
     // Pomocná metoda pro výpočet ceny
     public int GetCost(int currentLevel)
     {
-        // Vzorec: Base * (Multiplier ^ Level)
         return Mathf.RoundToInt(BaseCost * Mathf.Pow(CostMultiplier, currentLevel));
     }
 
@@ -41,18 +40,33 @@ public class StatUpgradeData : ScriptableObject
         return currentLevel >= MaxLevel;
     }
 
-    // Dynamický text pro UI (např. "Current: 10 -> Next: 15")
+    // Zapouzdřené formátování hodnoty
+    private string FormatValue(float value)
+    {
+        if (IsPercentage)
+        {
+            // Vynásobení 100 pro zobrazení (0.02 -> 2)
+            // "0.##" zaručí zobrazení až 2 desetinných míst, pokud existují, jinak je vynechá.
+            return $"{(value * 100f).ToString("0.##")}%";
+        }
+        else
+        {
+            return value.ToString("0.##");
+        }
+    }
+
+    // Dynamický text pro UI (např. "10 -> 15" nebo "2% -> 4%")
     public string GetValuePreview(int currentLevel)
     {
         float currentVal = GetTotalBonus(currentLevel);
 
         if (IsMaxLevel(currentLevel))
         {
-            return $"<color=orange>Total: +{currentVal:F1}</color>";
+            return $"<color=orange>Total: +{FormatValue(currentVal)}</color>";
         }
 
         float nextVal = GetTotalBonus(currentLevel + 1);
-        // Formát: "10 -> 15" (zeleně zvýrazníme novou hodnotu)
-        return $"{currentVal:F1} -> <color=#00FF00>+{nextVal:F1}</color>";
+        
+        return $"{FormatValue(currentVal)} -> <color=#00FF00>+{FormatValue(nextVal)}</color>";
     }
 }

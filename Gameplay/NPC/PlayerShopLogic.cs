@@ -12,13 +12,13 @@ public class PlayerShopLogic : NetworkBehaviour
 
         if (IsLocalPlayer)
         {
-            Debug.Log("--- DEBUG SÍŤOVÝCH KOMPONENT ---");
+            //Debug.Log("--- DEBUG SÍŤOVÝCH KOMPONENT ---");
             var behaviours = GetComponents<NetworkBehaviour>();
             for (int i = 0; i < behaviours.Length; i++)
             {
-                Debug.Log($"Index {i}: {behaviours[i].GetType().Name}");
+                //Debug.Log($"Index {i}: {behaviours[i].GetType().Name}");
             }
-            Debug.Log("--------------------------------");
+            //Debug.Log("--------------------------------");
         }
     }
 
@@ -34,7 +34,7 @@ public class PlayerShopLogic : NetworkBehaviour
         if (!IsOwner) return;
 
         // Vypíšeme, kdo volá nákup
-        Debug.Log($"[SHOP DEBUG] Volám nákup na objektu: {gameObject.name}, NetID: {NetworkObjectId}, BehaviourIndex: 17");
+        //Debug.Log($"[SHOP DEBUG] Volám nákup na objektu: {gameObject.name}, NetID: {NetworkObjectId}, BehaviourIndex: 17");
 
         // Kontrola existence
         if (NetworkManager.Singleton.SpawnManager.SpawnedObjects.TryGetValue(NetworkObjectId, out var obj))

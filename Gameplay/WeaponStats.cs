@@ -34,4 +34,6 @@ public struct WeaponStats
 
     [Header("OnHits")]
     public List<HitEffect> OnHitEffects;
+
+    
 }

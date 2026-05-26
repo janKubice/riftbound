@@ -60,6 +60,12 @@ public class PauseMenuUI : MonoBehaviour
         Cursor.lockState = _isOpen ? CursorLockMode.None : CursorLockMode.Locked;
         Cursor.visible = _isOpen;
 
+        // Kontrola singleplayeru (hráč je v relaci sám)
+        if (NetworkManager.Singleton != null && NetworkManager.Singleton.ConnectedClientsIds.Count == 1)
+        {
+            Time.timeScale = _isOpen ? 0f : 1f;
+        }
+
         if (_isOpen)
         {
             ShowMainButtons();

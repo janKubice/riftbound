@@ -17,14 +17,14 @@ public class ProjectileAttackLogic : AttackLogic
         // --- OPRAVA SMĚRU STŘELBY ---
         // Místo spoléhání se na rotaci zbraně (která se nemusí hýbat nahoru/dolů)
         // si vypočítáme rotaci přímo k bodu, kam hráč míří.
-        
+
         Quaternion attackRotation = firePoint.rotation; // Fallback (pro AI nebo chyby)
 
         if (attacker.TryGetComponent(out PlayerAiming aiming))
         {
             // Získáme bod v prostoru, kam hráč právě kouká (synchronizováno přes síť)
             Vector3 targetPoint = aiming.CurrentAimPoint;
-            
+
             // Vypočítáme vektor od hlavně k tomuto bodu
             Vector3 directionToTarget = (targetPoint - firePoint.position).normalized;
 
@@ -36,14 +36,14 @@ public class ProjectileAttackLogic : AttackLogic
         }
 
         // 2. Počet projektilů (Spread logic)
-        int count =  stats.ProjectileCount + projectileCountBonus;
+        int count = stats.ProjectileCount + projectileCountBonus;
         float startAngle = -stats.Spread / 2f;
         float angleStep = count > 1 ? stats.Spread / (count - 1) : 0f;
 
         for (int i = 0; i < count; i++)
         {
             float currentAngle = count > 1 ? startAngle + (angleStep * i) : 0f;
-            
+
             // Rotace výstřelu podle rozptylu (přičítáme k naší vypočítané attackRotation)
             // Pozor: Spread aplikujeme lokálně k rotaci (proto násobení zprava)
             Quaternion spreadRot = Quaternion.Euler(0, currentAngle, 0);
@@ -60,9 +60,10 @@ public class ProjectileAttackLogic : AttackLogic
             if (projGO.TryGetComponent(out SmartProjectile smartProj))
             {
                 smartProj.GetComponent<NetworkObject>().Spawn(true);
-                
+
                 // Inicializujeme s vypočítanou rotací
-                smartProj.Initialize(attacker, finalRot * Vector3.forward, stats);            }
+                smartProj.Initialize(attacker, finalRot * Vector3.forward, stats, stats.OnHitEffects);
+            }
             else
             {
                 Debug.LogError("ProjectilePrefab nemá komponentu SmartProjectile!");
@@ -73,4 +74,4 @@ public class ProjectileAttackLogic : AttackLogic
         // 5. Zpětná vazba
         weaponManager.OnWeaponFiredServerRpc(stats.Cooldown);
     }
-} 
+}

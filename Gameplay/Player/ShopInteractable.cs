@@ -8,34 +8,51 @@ public class ShopInteractable : NetworkBehaviour, IInteractable
     [SerializeField] private List<ShopItemData> _shopItems;
 
     [Header("UI")]
-    [SerializeField] private ShopUI _shopUI; // Odkaz na UI ve scéně (nebo prefab)
+    [SerializeField] private ShopUI _shopUI;
+
+    [Header("Feedback")]
+    [SerializeField] private InteractionFeedback _feedback;
 
     public string InteractionPrompt => "E - Open Shop";
 
-    // Pomocná metoda pro ServerRPC ve WeaponManageru
     public ShopItemData GetItemByIndex(int index)
     {
-        if (index >= 0 && index < _shopItems.Count) return _shopItems[index];
+        if (index >= 0 && index < _shopItems.Count)
+            return _shopItems[index];
+
         return null;
     }
 
     public void Interact(NetworkObject interactor)
     {
-        // Interakce běží na serveru, ale UI musíme otevřít na klientovi.
+        if (!IsServer)
+            return;
+
+        if (interactor == null)
+            return;
+
         ulong clientId = interactor.OwnerClientId;
-        OpenShopClientRpc(clientId);
+
+        ClientRpcParams rpcParams = new ClientRpcParams
+        {
+            Send = new ClientRpcSendParams
+            {
+                TargetClientIds = new[] { clientId }
+            }
+        };
+
+        OpenShopClientRpc(rpcParams);
+
+        if (_feedback != null)
+            _feedback.PlayForAllClients();
     }
 
     [ClientRpc]
-    private void OpenShopClientRpc(ulong targetClientId)
+    private void OpenShopClientRpc(ClientRpcParams rpcParams = default)
     {
-        // Otevřeme UI jen tomu, kdo interagoval
-        if (NetworkManager.Singleton.LocalClientId == targetClientId)
+        if (_shopUI != null)
         {
-            if (_shopUI != null)
-            {
-                _shopUI.OpenShop(this, _shopItems);
-            }
+            _shopUI.OpenShop(this, _shopItems);
         }
     }
 }

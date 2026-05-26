@@ -41,6 +41,11 @@ public class TimeEchoEffect : HitEffect
         {
             echo.Initialize(attacker, manager, remainingPayload, Duration, TickInterval);
         }
+
+        if (echoGo.TryGetComponent(out TimeEchoMaterialDriver visual))
+        {
+            visual.Play(Duration, TickInterval);
+        }
     }
 
     public override string GetDescription()

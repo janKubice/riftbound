@@ -23,20 +23,28 @@ public class SpawnProcEffect : HitEffect
 
     public override void OnHit(Vector3 hitPosition, GameObject target, NetworkObject attacker, WeaponManager manager, List<HitEffect> remainingPayload)
     {
-        // 1. Spawn
+        if (!NetworkManager.Singleton.IsServer) return;
+
+        if (ProjectileSpawnQueue.Instance == null)
+        {
+            Debug.LogError("[SpawnProcEffect] ProjectileSpawnQueue is missing in the scene!");
+            return;
+        }
+
+        if (ProjectilePrefab == null) return;
+
+        // 1. Výpočet pozice a směru
         Vector3 spawnPos = hitPosition + (Vector3.up * 1f);
-        GameObject newProjGO = Instantiate(ProjectilePrefab, spawnPos, Quaternion.identity);
+        Vector3 spawnDir = Vector3.up; // Ponecháno z tvého originálu. Zvaž, zda nechceš střílet k cíli nebo od něj.
 
         // 2. Příprava Payloadu pro nový projektil
         List<HitEffect> finalPayload = new List<HitEffect>();
 
-        // Přidáme specifické efekty pro tento proc (např. vždy exploduje)
         if (BasePayload != null)
         {
             finalPayload.AddRange(BasePayload);
         }
 
-        // Pokud má dědit efekty, vezme ZBYTEK fronty, ne efekty ze zbraně!
         if (InheritWeaponEffects && remainingPayload != null)
         {
             foreach (var effect in remainingPayload)
@@ -47,34 +55,41 @@ public class SpawnProcEffect : HitEffect
             }
         }
 
-        float baseDamage = manager.CurrentWeaponData != null ? manager.CurrentWeaponData.BaseStats.Damage : 0f;
+        // 3. Výpočet poškození (s ochranou proti null manageru)
+        float baseDamage = (manager != null && manager.CurrentWeaponData != null) 
+            ? manager.CurrentWeaponData.BaseStats.Damage 
+            : 0f;
 
         float calculatedDamage = baseDamage * DamageMultiplier;
         float finalDamage = calculatedDamage > 0f ? calculatedDamage : DefaultDamage;
 
-        // 3. Inicializace projektilu s namíchaným payloadem
-        if (newProjGO.TryGetComponent(out SmartProjectile smartProj))
+        WeaponStats procStats = new WeaponStats
         {
-            WeaponStats procStats = new WeaponStats();
-            procStats.ProjectileSpeed = Speed;
-            procStats.Range = Range;
-            procStats.Damage = (int)finalDamage;
+            ProjectileSpeed = Speed,
+            Range = Range,
+            Damage = (int)finalDamage
+        };
 
-            // Předáme vygenerovaný seznam a přidáme ignorovaný cíl, ať ho to hned netrefí
-            smartProj.Initialize(attacker, Vector3.up, procStats, finalPayload);
-            smartProj.AddIgnoredTarget(target);
-        }
-
-        if (newProjGO.TryGetComponent(out NetworkObject netObj))
+        // 4. Vytvoření requestu a předání frontě
+        SpawnRequest request = new SpawnRequest
         {
-            netObj.Spawn(true);
-        }
+            Prefab = ProjectilePrefab,
+            Position = spawnPos,
+            Rotation = Quaternion.identity,
+            Direction = spawnDir,
+            Attacker = attacker,
+            Stats = procStats,
+            Payload = finalPayload,
+            IgnoredTarget = target
+        };
+
+        ProjectileSpawnQueue.Instance.EnqueueSpawn(request);
     }
 
     public override string GetDescription()
     {
         string inheritText = InheritWeaponEffects ? "inherited and " : "";
-        return $"<color=#00CED1><b>Proc - {ProjectilePrefab.name}:</b></color> Spawns a secondary projectile on hit " +
+        return $"<color=#00CED1><b>Proc - {ProjectilePrefab?.name}:</b></color> Spawns a secondary projectile on hit " +
                $"with <color=white>{inheritText}custom</color> effects.";
     }
 }

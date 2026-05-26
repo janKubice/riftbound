@@ -1,13 +1,18 @@
 using UnityEngine;
-using RogueDeckCoop.Networking;
 using Unity.Netcode;
+using System.Collections;
+using Steamworks;
+using RogueDeckCoop.Networking;
 
-// Děláme z toho NetworkBehaviour, aby server mohl posílat příkazy klientům (ClientRpc)
 public class SteamStatsManager : NetworkBehaviour
 {
     public static SteamStatsManager Instance { get; private set; }
 
+    [Header("Settings")]
+    [SerializeField] private float _autoSaveInterval = 30f;
+
     private bool _statsValid = false;
+    private bool _isDirty = false;
 
     private void Awake()
     {
@@ -20,76 +25,114 @@ public class SteamStatsManager : NetworkBehaviour
         DontDestroyOnLoad(gameObject);
     }
 
-    // ------------------------------------------------------------------------
-    // HLAVNÍ METODA (Lokální) - Voláš, když se něco stane u tebe (otevření truhly, smrt)
-    // ------------------------------------------------------------------------
+    private void Start()
+    {
+        if (SteamManager.Instance != null && SteamManager.Instance.IsSteamInitialized)
+        {
+            // SDK >= 1.61: Data jsou automaticky synchronizována Steam klientem před spuštěním
+            _statsValid = true;
+            StartCoroutine(AutoSaveRoutine());
+        }
+        else
+        {
+            Debug.LogError("[SteamStatsManager] Steam API není inicializováno.");
+        }
+    }
+
+    private IEnumerator AutoSaveRoutine()
+    {
+        while (true)
+        {
+            yield return new WaitForSeconds(_autoSaveInterval);
+            SaveStatsIfDirty();
+        }
+    }
+
+    private void SaveStatsIfDirty()
+    {
+        if (_statsValid && _isDirty)
+        {
+            SteamUserStats.StoreStats();
+            _isDirty = false;
+        }
+    }
+
     public void IncrementStat(string statApiName, int amount = 1)
     {
         if (!_statsValid) return;
 
-        // 1. Získat aktuální hodnotu
         int currentValue;
-        bool success = global::Steamworks.SteamUserStats.GetStat(statApiName, out currentValue);
+        bool success = SteamUserStats.GetStat(statApiName, out currentValue);
 
         if (success)
         {
-            // 2. Zvýšit
             currentValue += amount;
-
-            // 3. Nastavit novou hodnotu
-            global::Steamworks.SteamUserStats.SetStat(statApiName, currentValue);
-
-            // 4. Uložit (Odeslat na Steam)
-            // Tip: Pokud bys posílal staty extrémně často (např. damage každou sekundu),
-            // je lepší StoreStats volat jen občas. Pro RPG/Survival je to ale OK volat hned.
-            global::Steamworks.SteamUserStats.StoreStats();
-            
-            Debug.Log($"[SteamStats] Stat '{statApiName}' zvýšen na {currentValue}");
-        }
-        else
-        {
-            Debug.LogError($"[SteamStats] Nepodařilo se najít stat s názvem: {statApiName}. Zkontroluj Steamworks portál.");
+            SteamUserStats.SetStat(statApiName, currentValue);
+            _isDirty = true;
         }
     }
 
-    // ------------------------------------------------------------------------
-    // SÍŤOVÁ METODA (Server -> Klient)
-    // Server může říct konkrétnímu hráči: "Započítej si stat"
-    // ------------------------------------------------------------------------
     [ClientRpc]
     public void IncrementStatClientRpc(string statApiName, int amount, ClientRpcParams rpcParams = default)
     {
-        // Toto se provede na klientovi, kterému to server poslal
-        if (IsOwner) // Pojistka: Staty si zapisuje jen ten, komu patří tento objekt (lokální hráč)
-        {
-            IncrementStat(statApiName, amount);
-        }
+        IncrementStat(statApiName, amount);
     }
 
-    // ------------------------------------------------------------------------
-    // POMOCNÁ METODA PRO PŘÍMÉ ODEMČENÍ (Pro achievementy bez statů)
-    // Např. "Najdi tajnou místnost" - tam se nic nepočítá, prostě ji najdeš.
-    // ------------------------------------------------------------------------
     public void UnlockAchievement(string achievementApiName)
     {
         if (!_statsValid) return;
 
         bool isAchieved;
-        global::Steamworks.SteamUserStats.GetAchievement(achievementApiName, out isAchieved);
+        SteamUserStats.GetAchievement(achievementApiName, out isAchieved);
 
         if (!isAchieved)
         {
-            global::Steamworks.SteamUserStats.SetAchievement(achievementApiName);
-            global::Steamworks.SteamUserStats.StoreStats();
-            Debug.Log($"[SteamStats] Achievement odemčen: {achievementApiName}");
+            SteamUserStats.SetAchievement(achievementApiName);
+            _isDirty = true;
         }
     }
-    
-    // Pro debugování - resetuje vše (vypni v ostré verzi)
+
     public void ResetAllStats(bool achievementsToo)
     {
-        global::Steamworks.SteamUserStats.ResetAllStats(achievementsToo);
-        global::Steamworks.SteamUserStats.StoreStats();
-        Debug.Log("[SteamStats] Všechny statistiky resetovány.");
+        if (!_statsValid) return;
+        SteamUserStats.ResetAllStats(achievementsToo);
+        SteamUserStats.StoreStats(); 
+        _isDirty = false;
+    }
+
+    public void IncrementStatForClient(ulong clientId, string statApiName, int amount = 1)
+    {
+        if (!IsServer) return;
+
+        ClientRpcParams rpcParams = new ClientRpcParams
+        {
+            Send = new ClientRpcSendParams { TargetClientIds = new[] { clientId } }
+        };
+
+        IncrementStatClientRpc(statApiName, amount, rpcParams);
+    }
+
+    public void UnlockAchievementForClient(ulong clientId, string achievementApiName)
+    {
+        if (!IsServer) return;
+
+        ClientRpcParams rpcParams = new ClientRpcParams
+        {
+            Send = new ClientRpcSendParams { TargetClientIds = new[] { clientId } }
+        };
+
+        UnlockAchievementClientRpc(achievementApiName, rpcParams);
+    }
+
+    [ClientRpc]
+    public void UnlockAchievementClientRpc(string achievementApiName, ClientRpcParams rpcParams = default)
+    {
+        UnlockAchievement(achievementApiName);
+    }
+
+    private void OnDestroy()
+    {
+        // Pojištění uložení dat při vypnutí aplikace
+        SaveStatsIfDirty();
     }
 }

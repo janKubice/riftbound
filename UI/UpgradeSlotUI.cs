@@ -1,8 +1,9 @@
 using UnityEngine;
 using UnityEngine.UI;
 using TMPro;
+using UnityEngine.EventSystems;
 
-public class UpgradeSlotUI : MonoBehaviour
+public class UpgradeSlotUI : MonoBehaviour, IPointerEnterHandler, IPointerExitHandler
 {
     [Header("UI Elementy")]
     [SerializeField] private Image _iconImage;
@@ -24,13 +25,15 @@ public class UpgradeSlotUI : MonoBehaviour
     private int _upgradeIndex;
     private PlayerProgression _playerProgression;
     private StatUpgradeData _data;
+    private UpgradeShopUI _parentShop;
 
     // Inicializace (volá Shop Manager při startu)
-    public void Initialize(int index, PlayerProgression progression, StatUpgradeData data)
+    public void Initialize(int index, PlayerProgression progression, StatUpgradeData data, UpgradeShopUI parentShop)
     {
         _upgradeIndex = index;
         _playerProgression = progression;
         _data = data;
+        _parentShop = parentShop;
 
         // Pokud není v demu, aktivujeme overlay a vypneme interaktivitu
         if (!data.inDemo)
@@ -57,6 +60,21 @@ public class UpgradeSlotUI : MonoBehaviour
         });
 
         Refresh();
+    }
+
+    public void OnPointerEnter(PointerEventData eventData)
+    {
+        if (_data == null || _parentShop == null) return;
+
+        int currentLevel = _playerProgression != null ? _playerProgression.GetUpgradeLevel(_upgradeIndex) : 0;
+        _parentShop.ShowTooltip(_data, currentLevel);
+    }
+
+    // Voláno enginem při odjetí myší
+    public void OnPointerExit(PointerEventData eventData)
+    {
+        if (_parentShop == null) return;
+        _parentShop.HideTooltip();
     }
 
     public void Refresh()

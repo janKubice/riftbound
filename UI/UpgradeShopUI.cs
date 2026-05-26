@@ -12,6 +12,12 @@ public class UpgradeShopUI : MonoBehaviour
     [SerializeField] private GameObject _slotPrefab;
     [SerializeField] private TMP_Text _totalXPText;
 
+    [Header("Tooltip Reference")]
+    [SerializeField] private GameObject _tooltipPanel; // Obalový objekt tooltipu
+    [SerializeField] private TMP_Text _tooltipNameText;
+    [SerializeField] private TMP_Text _tooltipDescriptionText;
+    [SerializeField] private TMP_Text _tooltipStatTypeText;
+
     private PlayerProgression _localPlayerProgression;
     private List<UpgradeSlotUI> _spawnedSlots = new List<UpgradeSlotUI>();
 
@@ -24,6 +30,7 @@ public class UpgradeShopUI : MonoBehaviour
     private void Start()
     {
         _shopWindow.SetActive(false);
+        HideTooltip();
     }
 
     private void Update()
@@ -41,6 +48,12 @@ public class UpgradeShopUI : MonoBehaviour
 
         if (_localPlayerController == null) FindLocalPlayer();
 
+        // Kontrola singleplayeru (hráč je v relaci sám)
+        if (NetworkManager.Singleton != null && NetworkManager.Singleton.ConnectedClientsIds.Count == 1)
+        {
+            Time.timeScale = _isOpen ? 0f : 1f;
+        }
+
         if (_localPlayerController != null)
         {
             if (_isOpen)
@@ -52,7 +65,7 @@ public class UpgradeShopUI : MonoBehaviour
                 // Zapneme Shop Mode (zajistí levitaci + zámek pohybu)
                 _localPlayerController.SetShopMode(true);
 
-                // Zapneme VFX efekty
+                // Zapneme VFX efekty - v singleplayeru se provede lokálně na serveru/hostovi
                 if (_localPlayerVFX != null) _localPlayerVFX.ToggleLevitationVFXServerRpc(true);
             }
             else
@@ -77,8 +90,8 @@ public class UpgradeShopUI : MonoBehaviour
         {
             _localPlayerProgression = localClient.GetComponent<PlayerProgression>();
             _localPlayerController = localClient.GetComponent<PlayerController>();
-            _localPlayerVFX = localClient.GetComponent<PlayerVFX>(); // <--- Najdeme VFX
-            _localAnimator = localClient.GetComponent<Animator>();   // <--- Najdeme Animator
+            _localPlayerVFX = localClient.GetComponent<PlayerVFX>();
+            _localAnimator = localClient.GetComponent<Animator>();
 
             if (_localPlayerProgression != null)
             {
@@ -101,21 +114,48 @@ public class UpgradeShopUI : MonoBehaviour
             StatUpgradeData data = _localPlayerProgression.GetData(i);
             GameObject newSlotObj = Instantiate(_slotPrefab, _slotsContainer);
             UpgradeSlotUI slotUI = newSlotObj.GetComponent<UpgradeSlotUI>();
-            slotUI.Initialize(i, _localPlayerProgression, data);
+            slotUI.Initialize(i, _localPlayerProgression, data, this);
             _spawnedSlots.Add(slotUI);
         }
         RefreshAllSlots();
     }
 
+    public void ShowTooltip(StatUpgradeData data, int currentLevel)
+    {
+        _tooltipPanel.SetActive(true);
+
+        // Voláme rozšířené metody přímo na enumu Type!
+        string displayName = data.Type.GetDisplayName();
+        string hexColor = data.Type.GetColorHex();
+
+        _tooltipNameText.text = $"<color={hexColor}>{data.UpgradeName}</color>";
+        _tooltipDescriptionText.text = data.Description;
+
+        _tooltipStatTypeText.text = $"Modifies: <color={hexColor}>{displayName}</color>\n" +
+                                    $"Effect: {data.GetValuePreview(currentLevel)}";
+    }
+
+    public void HideTooltip()
+    {
+        _tooltipPanel.SetActive(false);
+    }
+
+
     private void RefreshAllSlots()
     {
         if (_localPlayerProgression == null) return;
-        _totalXPText.text = $"XP: {_localPlayerProgression.CurrentXP.Value}";
+        _totalXPText.SetText("XP: {0}", _localPlayerProgression.CurrentXP.Value);
         foreach (var slot in _spawnedSlots) slot.Refresh();
     }
 
     private void OnDestroy()
     {
+        // Pojistka pro obnovení času při zničení UI okna během pauzy
+        if (_isOpen)
+        {
+            Time.timeScale = 1f;
+        }
+
         if (_localPlayerProgression != null)
         {
             _localPlayerProgression.OnResourcesChanged -= RefreshAllSlots;

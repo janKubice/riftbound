@@ -1,6 +1,7 @@
 using UnityEngine;
 using System.Collections.Generic;
 using Unity.Netcode;
+using TMPro;
 
 public class ShopUI : MonoBehaviour
 {
@@ -8,13 +9,15 @@ public class ShopUI : MonoBehaviour
     [SerializeField] private GameObject _panel;
     [SerializeField] private Transform _shopContainer;
     [SerializeField] private Transform _weaponEffectsContainer;
-    
+
     [Header("Prefabs")]
     [SerializeField] private ShopItemUI _shopItemPrefab;      // ZMĚNA: Typ je nyní náš skript
     [SerializeField] private WeaponEffectUI _effectSlotPrefab; // ZMĚNA: Typ je nyní náš skript
 
     [Header("New UI Elements")]
     [SerializeField] private ShopTooltipUI _tooltip;
+    [Tooltip("Text pro zobrazení aktuálních XP")]
+    [SerializeField] private TextMeshProUGUI _xpText;
 
     // Pooling seznamy
     private List<ShopItemUI> _spawnedShopSlots = new List<ShopItemUI>();
@@ -33,6 +36,15 @@ public class ShopUI : MonoBehaviour
         _panel.SetActive(false);
     }
 
+    private void OnDestroy()
+    {
+        // Bezpečnostní pojistka pro případ, že by se scéna změnila nebo byl objekt zničen s otevřeným UI
+        if (_panel != null && _panel.activeSelf)
+        {
+            Time.timeScale = 1f;
+        }
+    }
+
     public void OpenShop(ShopInteractable shop, List<ShopItemData> items)
     {
         _currentShop = shop;
@@ -46,26 +58,44 @@ public class ShopUI : MonoBehaviour
         _localProgression = localPlayer.GetComponent<PlayerProgression>();
         _shopController = localPlayer.GetComponent<PlayerShopController>();
 
-        // Subscribe eventů pro reaktivní UI (předpokládám, že je máš)
-        // Pokud ne, doporučuji je přidat do PlayerProgression/WeaponManager
-        // _localProgression.OnGoldChanged += RefreshVisuals;
-        // _localWeaponManager.OnEffectsChanged += RefreshVisuals;
+        if (_localProgression != null)
+        {
+            _localProgression.Gold.OnValueChanged += OnResourcesChanged;
+            _localProgression.CurrentXP.OnValueChanged += OnResourcesChanged;
+        }
 
         _panel.SetActive(true);
         Cursor.lockState = CursorLockMode.None;
         Cursor.visible = true;
 
+        // Kontrola singleplayeru (hráč je v relaci sám) -> Pozastavit hru
+        if (NetworkManager.Singleton != null && NetworkManager.Singleton.ConnectedClientsIds.Count == 1)
+        {
+            Time.timeScale = 0f;
+        }
+
         RefreshVisuals();
+        RefreshResourceTexts();
     }
 
     public void CloseShop()
     {
         // Unsubscribe eventů
-        // if (_localProgression != null) _localProgression.OnGoldChanged -= RefreshVisuals;
+        if (_localProgression != null)
+        {
+            _localProgression.Gold.OnValueChanged -= OnResourcesChanged;
+            _localProgression.CurrentXP.OnValueChanged -= OnResourcesChanged;
+        }
         if (_tooltip != null) _tooltip.Hide();
         _panel.SetActive(false);
         Cursor.lockState = CursorLockMode.Locked;
         Cursor.visible = false;
+
+        // Obnovit herní čas, pokud jsme v singleplayeru
+        if (NetworkManager.Singleton != null && NetworkManager.Singleton.ConnectedClientsIds.Count == 1)
+        {
+            Time.timeScale = 1f;
+        }
     }
 
     // Voláme, kdykoliv se něco změní (kliknutí, nákup, prodej)
@@ -75,31 +105,77 @@ public class ShopUI : MonoBehaviour
         RefreshWeaponEffects();
     }
 
+    private void OnResourcesChanged(int previousValue, int newValue)
+    {
+        // Aktualizujeme texty nahoře
+        RefreshResourceTexts();
+
+        // Aktualizujeme i samotné itemy (např. aby tlačítko nákupu zešedlo, pokud už nemám dost peněz)
+        if (_currentShopItems != null)
+        {
+            RefreshShopList(_currentShopItems);
+        }
+    }
+
+    private void RefreshResourceTexts()
+    {
+        if (_localProgression == null) return;
+
+        if (_xpText != null)
+        {
+            _xpText.text = $"{_localProgression.Gold.Value:N0} <color=#AAAAAA>XP</color>";
+        }
+    }
+
     // --- OPTIMALIZOVANÝ LISTING (Pooling Pattern) ---
-    
+
     private void RefreshShopList(List<ShopItemData> items)
     {
-        // 1. Pooling (stejný jako minule)
         while (_spawnedShopSlots.Count < items.Count)
         {
-            ShopItemUI newSlot = Instantiate(_shopItemPrefab, _shopContainer); // Upravený prefab
+            ShopItemUI newSlot = Instantiate(_shopItemPrefab, _shopContainer);
             _spawnedShopSlots.Add(newSlot);
         }
 
-        // 2. Setup slotů - PŘIDÁVÁME Tooltip callbacky
+        int totalEffectsCount = 0;
+        var currentEffects = _localWeaponManager?.CurrentRuntimeStats.OnHitEffects;
+
+        if (currentEffects != null)
+        {
+            totalEffectsCount = currentEffects.Count;
+        }
+
         for (int i = 0; i < items.Count; i++)
         {
-            _spawnedShopSlots[i].Setup(
-                items[i], 
-                i, 
+            int duplicateCount = 0;
+
+            // Zjištění počtu duplikátů pro konkrétní iterovaný item
+            if (currentEffects != null && items[i].EffectPayload != null)
+            {
+                // Předpokládá se, že porovnáváš instance ScriptableObjectů.
+                // Pokud se instancují kopie, použij porovnání přes unikátní ID.
+                foreach (var effect in currentEffects)
+                {
+                    if (effect == items[i].EffectPayload)
+                    {
+                        duplicateCount++;
+                    }
+                }
+            }
+
+            int dynamicPrice = items[i].GetDynamicPrice(totalEffectsCount, duplicateCount);
+
+            _spawnedShopSlots[i].SetupWithDynamicPrice(
+                items[i],
+                i,
                 _localProgression.Gold.Value,
-                OnBuyClicked,       // Akce nákupu
-                OnSlotHoverEnter,   // Akce najetí myši -> Zobraz Tooltip
-                OnSlotHoverExit     // Akce odjetí myši -> Skryj Tooltip
+                dynamicPrice,
+                OnBuyClicked,
+                OnSlotHoverEnter,
+                OnSlotHoverExit
             );
         }
 
-        // 3. Skrytí přebytečných
         for (int i = items.Count; i < _spawnedShopSlots.Count; i++)
         {
             _spawnedShopSlots[i].gameObject.SetActive(false);
@@ -146,17 +222,44 @@ public class ShopUI : MonoBehaviour
 
     private void OnBuyClicked(int index, ShopItemData item)
     {
-        if (_localProgression.Gold.Value < item.GoldCost) return;
-        
+        if (item == null) return;
+        if (!item.InDemo) return;
+
+        int totalEffectsCount = 0;
+        int duplicateCount = 0;
+
+        var currentEffects = _localWeaponManager?.CurrentRuntimeStats.OnHitEffects;
+        if (currentEffects != null)
+        {
+            totalEffectsCount = currentEffects.Count;
+
+            if (item.EffectPayload != null)
+            {
+                foreach (var effect in currentEffects)
+                {
+                    if (effect == item.EffectPayload)
+                    {
+                        duplicateCount++;
+                    }
+                }
+            }
+        }
+
+        // Výpočet ceny kombinující celkový počet slotů i specifické duplikáty
+        int realPrice = item.GetDynamicPrice(totalEffectsCount, duplicateCount);
+
+        if (_localProgression.Gold.Value < realPrice) return;
+
         if (_shopController != null)
         {
-            // Optimistic Update: Můžeme přehrát zvuk hned, i když server ještě nepotvrdil
             _shopController.BuyItemTransactionServerRpc(index, _currentShop);
-            
-            // POZNÁMKA: Správně by UI nemělo reagovat hned, ale počkat, až se vrátí změna ze serveru
-            // (např. přes NetworkVariable OnValueChanged), která zavolá RefreshVisuals.
-            // Pro jednoduchost volám refresh po malém zpoždění nebo spoléhám na eventy.
+
+            // Okamžitý lokální "odhadovaný" update (Optimistic UI), aby se předešlo lagu
+            Invoke(nameof(RefreshVisuals), 0.05f);
         }
+
+        RefreshVisuals();
+        RefreshResourceTexts();
     }
 
     private void OnSwapClicked(int indexA, int indexB)
@@ -168,5 +271,7 @@ public class ShopUI : MonoBehaviour
     private void OnSellClicked(int index)
     {
         _shopController?.RemoveEffectServerRpc(index);
+        RefreshVisuals();
+        RefreshResourceTexts();
     }
 }

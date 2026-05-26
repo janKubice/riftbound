@@ -24,16 +24,16 @@ public class UIDebugger : MonoBehaviour
         List<RaycastResult> results = new List<RaycastResult>();
         EventSystem.current.RaycastAll(pointerData, results);
 
-        Debug.Log($"--- KLIK NA POZICI {pointerData.position} ---");
+        //Debug.Log($"--- KLIK NA POZICI {pointerData.position} ---");
         
         if (results.Count == 0)
         {
-            Debug.Log("UI Raycast netrefil NIC. (Chybí EventSystem? Nebo GraphicRaycaster?)");
+            //Debug.Log("UI Raycast netrefil NIC. (Chybí EventSystem? Nebo GraphicRaycaster?)");
         }
 
         foreach (RaycastResult result in results)
         {
-            Debug.Log($"Trefeno: {result.gameObject.name} (Depth: {result.depth}, SortingLayer: {result.sortingLayer})");
+            //Debug.Log($"Trefeno: {result.gameObject.name} (Depth: {result.depth}, SortingLayer: {result.sortingLayer})");
         }
     }
 }

@@ -8,26 +8,47 @@ public class HomingProjectile : SmartProjectile
     [SerializeField] private float _searchRadius = 25f;
     [SerializeField] private float _homingDelay = 0.15f;
     [SerializeField] private LayerMask _targetLayer;
-
-    private Collider _targetCollider; 
+    [SerializeField] private float _retargetInterval = 0.15f;
+    [SerializeField] private float _retargetJitter = 0.05f;
+    
+    private float _nextSearchTime;
+    private Collider _targetCollider;
     private float _timeAlive;
 
     // Statický buffer sdílený všemi projektily (drastická úspora paměti pro Survivor-like)
     private static readonly Collider[] _hitBuffer = new Collider[50];
+
+    // Reset stavu při navrácení do fronty (Object Pool) nebo při zničení
+    private void OnDisable()
+    {
+        _targetCollider = null;
+        _timeAlive = 0f;
+        _nextSearchTime = 0f;
+    }
 
     private void Update()
     {
         if (!IsServer) return;
 
         _timeAlive += Time.deltaTime;
-        
-        if (_timeAlive < _homingDelay) return;
 
-        // Pokud cíl umřel nebo zmizel, najdeme nový
-        if (_targetCollider == null || !_targetCollider.gameObject.activeInHierarchy)
-        {
-            FindClosestTarget();
-        }
+        if (_timeAlive < _homingDelay)
+            return;
+
+        bool targetInvalid =
+            _targetCollider == null ||
+            !_targetCollider.gameObject.activeInHierarchy ||
+            !CanUseAsHomingTarget(_targetCollider);
+
+        if (!targetInvalid)
+            return;
+
+        if (Time.time < _nextSearchTime)
+            return;
+
+        FindClosestTarget();
+
+        _nextSearchTime = Time.time + _retargetInterval + Random.Range(0f, _retargetJitter);
     }
 
     private void FixedUpdate()
@@ -42,25 +63,41 @@ public class HomingProjectile : SmartProjectile
 
     private void FindClosestTarget()
     {
-        // NonAlloc varianta - nevytváří garbage
-        int hitCount = Physics.OverlapSphereNonAlloc(transform.position, _searchRadius, _hitBuffer, _targetLayer);
-        
+        int hitCount = Physics.OverlapSphereNonAlloc(
+            transform.position,
+            _searchRadius,
+            _hitBuffer,
+            _targetLayer
+        );
+
         float closestDist = Mathf.Infinity;
         Collider bestTarget = null;
 
         for (int i = 0; i < hitCount; i++)
         {
             Collider hit = _hitBuffer[i];
+            if (hit == null)
+                continue;
 
-            // 1. Ignorovat cíle, které už tento projektil zasáhl (např. ten, od kterého se odrazil)
-            if (_hitHistory.Contains(hit.gameObject)) continue;
+            // UPOZORNĚNÍ: Filtrování ostatních projektilů nyní musí řešit _targetLayer!
+            // Z důvodu výkonu zde byl odstraněn GetComponentInParent<SmartProjectile>().
 
-            // 2. OPRAVA: Ignorovat samotného střelce podle unikátního NetworkObjectId
-            var netObj = hit.GetComponentInParent<NetworkObject>();
-            if (netObj != null && netObj.NetworkObjectId == _attackerObjectId) continue;
+            if (!CombatTargeting.CanDamage(_attackerObj, hit))
+                continue;
 
-            float dist = Vector3.SqrMagnitude(transform.position - hit.transform.position); 
-            
+            GameObject hitKey = ResolveHitHistoryKey(hit);
+            if (hitKey != null && _hitHistory.Contains(hitKey))
+                continue;
+
+            NetworkObject netObj = hit.GetComponentInParent<NetworkObject>();
+            if (netObj != null && netObj.NetworkObjectId == _attackerObjectId)
+                continue;
+
+            if (!CanUseAsHomingTarget(hit))
+                continue;
+
+            float dist = Vector3.SqrMagnitude(transform.position - hit.transform.position);
+
             if (dist < closestDist)
             {
                 closestDist = dist;
@@ -69,7 +106,7 @@ public class HomingProjectile : SmartProjectile
         }
 
         _targetCollider = bestTarget;
-        
+
         System.Array.Clear(_hitBuffer, 0, hitCount);
     }
 
@@ -78,17 +115,19 @@ public class HomingProjectile : SmartProjectile
         Vector3 targetCenter = _targetCollider.bounds.center;
         Vector3 directionToTarget = (targetCenter - transform.position).normalized;
         Vector3 currentVelocity = _rb.linearVelocity;
-        
+
         if (currentVelocity == Vector3.zero) return;
 
         Vector3 newVelocityDir = Vector3.RotateTowards(
-            currentVelocity.normalized, 
-            directionToTarget, 
-            _turnSpeed * Time.fixedDeltaTime, 
+            currentVelocity.normalized,
+            directionToTarget,
+            _turnSpeed * Time.fixedDeltaTime,
             0.0f
         );
 
         _rb.linearVelocity = newVelocityDir * currentVelocity.magnitude;
-        transform.rotation = Quaternion.LookRotation(newVelocityDir);
+        
+        // Změna na MoveRotation pro korektní interakci s fyzikálním enginem a network interpolací
+        _rb.MoveRotation(Quaternion.LookRotation(newVelocityDir));
     }
 }

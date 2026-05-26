@@ -28,6 +28,7 @@ public class WeaponManager : NetworkBehaviour
     private GameObject _currentWeaponInstance;
     [SerializeField] private WeaponStats _currentRuntimeStats;
     public WeaponStats CurrentRuntimeStats => _currentRuntimeStats;
+    public bool HasWeaponEquipped => _currentWeaponIndex.Value >= 0;
     private WeaponData _currentWeaponData; // Aktuální data (včetně logiky útoku)
     public WeaponData CurrentWeaponData => _currentWeaponData;
     private AnimatorOverrideController _animOverrideController;
@@ -45,6 +46,27 @@ public class WeaponManager : NetworkBehaviour
     private PlayerProgression _progression;
 
     public static event Action OnLocalWeaponEquipped;
+
+    void Awake()
+    {
+        for (int i = 0; i < _weaponPrefabs.Count; i++)
+        {
+            if (_weaponPrefabs[i] == null)
+            {
+                Debug.LogError($"[WeaponManager] CHYBA: Na indexu {i} v listu '_weaponPrefabs' je 'None' (chybí prefab)!");
+            }
+            else if (_weaponPrefabs[i].GetComponent<WeaponDataHolder>() == null)
+            {
+                Debug.LogError($"[WeaponManager] CHYBA: Prefab '{_weaponPrefabs[i].name}' nemá skript 'WeaponDataHolder'!");
+            }
+            else if (_weaponPrefabs[i].GetComponent<WeaponDataHolder>().Data == null)
+            {
+                Debug.LogError($"[WeaponManager] CHYBA: Prefab '{_weaponPrefabs[i].name}' má Holder, ale chybí v něm 'WeaponData' (ScriptableObject)!");
+            }
+
+            _weaponPrefabs[i].GetComponent<WeaponDataHolder>().Data.BaseStats.OnHitEffects = new List<HitEffect>(); 
+        }
+    }
 
     public override void OnNetworkSpawn()
     {
@@ -73,7 +95,7 @@ public class WeaponManager : NetworkBehaviour
             // Pokud začínáme bez zbraně
             _currentWeaponIndex.Value = -1;
         }
-        _aiming = GetComponent<PlayerAiming>(); 
+        _aiming = GetComponent<PlayerAiming>();
         if (_progression == null) _progression = GetComponent<PlayerProgression>();
     }
 
@@ -129,7 +151,7 @@ public class WeaponManager : NetworkBehaviour
             else
             {
                 // Pokud se nestřílí, laser vypneme
-                _visuals.UpdateLaserVisual(false, Vector3.zero, new Vector3(0,0,0));
+                _visuals.UpdateLaserVisual(false, Vector3.zero, new Vector3(0, 0, 0));
             }
         }
     }
@@ -252,7 +274,7 @@ public class WeaponManager : NetworkBehaviour
     [ClientRpc]
     private void OnWeaponFiredClientRpc(float cooldown)
     {
-        Debug.Log("[WeaponManager] Pokus o přehrání visuals.");
+        //Debug.Log("[WeaponManager] Pokus o přehrání visuals.");
         // Předáme vizuálnímu kontroleru
         if (_visuals != null)
         {
@@ -361,26 +383,38 @@ public class WeaponManager : NetworkBehaviour
         if (weaponPrefab != null)
         {
             _currentWeaponInstance = Instantiate(weaponPrefab, _rightHandSocket);
-            _currentWeaponInstance.transform.SetLocalPositionAndRotation(Vector3.zero, Quaternion.identity);
 
-            // Získáme Data Holder z prefabu zbraně
+            // Získáme Data Holder z prefabu zbraně HNED, abychom z něj vzali offsety
             WeaponDataHolder holder = _currentWeaponInstance.GetComponent<WeaponDataHolder>();
 
-            if (holder != null && holder.Data != null)
+            if (holder != null)
             {
-                // A) Uložíme data
-                _currentWeaponData = holder.Data;
-                _currentRuntimeStats = _currentWeaponData.BaseStats;
+                // Místo nulování aplikujeme tvůj nastavený Offset a Rotaci
+                _currentWeaponInstance.transform.localPosition = holder.PositionOffset;
+                _currentWeaponInstance.transform.localRotation = Quaternion.Euler(holder.RotationOffset);
 
-                // C) Inicializujeme vizuální controller (IK, Trails...)
-                if (_visuals != null)
+                if (holder.Data != null)
                 {
-                    _visuals.InitializeWeapon(_currentWeaponData, _currentWeaponInstance);
+                    // A) Uložíme data
+                    _currentWeaponData = holder.Data;
+                    _currentRuntimeStats = _currentWeaponData.BaseStats;
+
+                    // C) Inicializujeme vizuální controller (IK, Trails...)
+                    if (_visuals != null)
+                    {
+                        _visuals.InitializeWeapon(_currentWeaponData, _currentWeaponInstance);
+                    }
+                }
+                else
+                {
+                    Debug.LogError($"[WeaponManager] Zbraň {_currentWeaponInstance.name} má DataHolder, ale chybí v něm Data!");
                 }
             }
             else
             {
-                Debug.LogError($"[WeaponManager] Zbraň {_currentWeaponInstance.name} nemá WeaponDataHolder nebo Data!");
+                // Fallback, pokud by zbraň neměla WeaponDataHolder (pro jistotu)
+                _currentWeaponInstance.transform.SetLocalPositionAndRotation(Vector3.zero, Quaternion.identity);
+                Debug.LogError($"[WeaponManager] Zbraň {_currentWeaponInstance.name} nemá WeaponDataHolder!");
             }
         }
     }
@@ -390,7 +424,8 @@ public class WeaponManager : NetworkBehaviour
         //Debug.Log("[WeaponManager] pokus o loop útok.");
         // Lokální kontrola cooldownu používá runtime staty
         float cd = _currentRuntimeStats.Cooldown > 0 ? _currentRuntimeStats.Cooldown : 0.1f;
-
+        float attackSpeed = _progression.GetStatMultiplier(StatType.AttackSpeed); 
+        cd /= attackSpeed > 0 ? attackSpeed : 1f;
         if (Time.time >= _lastAttackTime + cd)
         {
             _lastAttackTime = Time.time;
