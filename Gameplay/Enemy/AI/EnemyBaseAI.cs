@@ -13,6 +13,7 @@ public abstract class EnemyBaseAI : NetworkBehaviour
 
     [Header("Base Settings")]
     [SerializeField] protected EnemyTier _tier = EnemyTier.Normal;
+    [SerializeField] public bool isDummy = false; // Pokud je TRUE, Manager tento objekt ignoruje (nepočítá se do aggro, pohybu, atd.)
     [HideInInspector] public Transform TargetPlayer;
     [HideInInspector] public Transform MyTransform;
     private float _verticalVelocity = 0f;

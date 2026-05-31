@@ -246,19 +246,31 @@ public class MainMenuUI : MonoBehaviour
         }
         else
         {
-            SteamManager.Instance.JoinLobby(lobbyId, "");
+            StartCoroutine(JoinLobbyDelayedRoutine(lobbyId, ""));
         }
     }
 
-    // --- PŘIPOJOVÁNÍ S HESLEM ---
+    private IEnumerator JoinLobbyDelayedRoutine(CSteamID lobbyId, string password)
+    {
+        // 1. Zapneme Loading Screen okamžitě
+        LoadingScreenManager.Instance.Show("Connecting to Server...");
+
+        // 2. TADY JE TRIK: Počkáme 1 frame. Unity během tohoto framu vykreslí UI na obrazovku.
+        yield return null;
+
+        // 3. Teprve teď spustíme těžkou operaci, která může mírně lagovat vlákno.
+        SteamManager.Instance.JoinLobby(lobbyId, password);
+    }
 
     public void OnConfirmPasswordClicked()
     {
         if (_pendingLobbyId.m_SteamID != 0)
         {
-            SteamManager.Instance.JoinLobby(_pendingLobbyId, _clientPasswordInput.text);
+            StartCoroutine(JoinLobbyDelayedRoutine(_pendingLobbyId, _clientPasswordInput.text));
         }
     }
+
+    // --- PŘIPOJOVÁNÍ S HESLEM ---
 
     public void OnCancelPasswordClicked()
     {

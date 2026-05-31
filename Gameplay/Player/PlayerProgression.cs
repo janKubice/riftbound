@@ -40,14 +40,12 @@ public class PlayerProgression : NetworkBehaviour
     {
         if (IsServer)
         {
-            // Inicializace listu levelů nulami
             for (int i = 0; i < _availableUpgrades.Count; i++)
             {
                 _upgradeLevels.Add(0);
                 _upgradeExtraBonuses.Add(0f);
             }
 
-            // 2. Nastavení startovních surovin (POUZE SERVER)
             CurrentXP.Value = _startXP;
             Gold.Value = _startGold;
             Essence.Value = _startEssence;
@@ -61,6 +59,12 @@ public class PlayerProgression : NetworkBehaviour
         {
             RecalculateStats();
             OnUpgradePurchased?.Invoke();
+        };
+
+        // PŘIDÁNO: Přepočet i při změně extra bonusů
+        _upgradeExtraBonuses.OnListChanged += (changeEvent) =>
+        {
+            RecalculateStats();
         };
 
         RecalculateStats();
@@ -300,12 +304,13 @@ public class PlayerProgression : NetworkBehaviour
         float normalValue = data.ValuePerLevel;
         float extraValue = awardedValue - normalValue;
 
-        _upgradeLevels[upgradeIndex] = currentLevel + 1;
-
+        // 1. NEJPRVE zapsat extra bonus!
         if (Mathf.Abs(extraValue) > 0.001f)
         {
             _upgradeExtraBonuses[upgradeIndex] = _upgradeExtraBonuses[upgradeIndex] + extraValue;
         }
+
+        _upgradeLevels[upgradeIndex] = currentLevel + 1;
 
         ApplyInstantStatChanges(data.Type, awardedValue);
 

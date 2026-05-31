@@ -30,7 +30,7 @@ public class RewardChoiceCardUI : MonoBehaviour
         Color rarityColor = RewardRarityUtility.GetColor(rarity);
 
         if (_background != null)
-            _background.color = new Color(rarityColor.r, rarityColor.g, rarityColor.b, 0.35f);
+            _background.color = new Color(rarityColor.r, rarityColor.g, rarityColor.b, 1.0f);
 
         if (_icon != null)
         {
@@ -48,8 +48,12 @@ public class RewardChoiceCardUI : MonoBehaviour
             _titleText.text = definition.BuildTitle(rarity);
 
         if (_descriptionText != null)
+        {
             _descriptionText.text = definition.BuildDescription(rarity);
+            _descriptionText.color = Color.white;
 
+        }
+            
         if (_button != null)
         {
             _button.onClick.RemoveAllListeners();

@@ -9,34 +9,34 @@ public class MusicManager : PersistentSingleton<MusicManager>
     [SerializeField] private GlobalMusicData _globalData;
 
     [Header("Settings")]
-    [SerializeField] private float _locationCrossfadeTime = 3.0f; // Pomalý přechod lokací
-    [SerializeField] private float _combatFadeInTime = 0.5f;      // Rychlý nástup boje
-    [SerializeField] private float _combatFadeOutTime = 2.0f;     // Pomalejší uklidnění
+    [SerializeField] private float _locationCrossfadeTime = 3.0f;
+    [SerializeField] private float _combatFadeInTime = 0.5f;
+    [SerializeField] private float _combatFadeOutTime = 2.0f;
     [Range(0f, 1f)] [SerializeField] private float _masterVolume = 0.5f;
 
-    // Interní stavy
     public enum MusicState { Menu, Exploration, Combat, Boss }
     private MusicState _currentState = MusicState.Menu;
     
-    // Audio Sources pro Double Buffering
     private AudioSource _sourceA;
     private AudioSource _sourceB;
     private bool _isSourceAActive = true;
 
-    // Aktuální kontext
     private LocationProfile _currentLocation;
-    private bool _isNight = false; // Toto musíte napojit na váš TimeManager
+    private bool _isNight = false;
     private Coroutine _fadeRoutine;
 
     protected override void Awake()
     {
         base.Awake();
-        // Vytvoříme dva zdroje dynamicky, abychom nemuseli nic nastavovat v Inspectoru
         _sourceA = gameObject.AddComponent<AudioSource>();
         _sourceB = gameObject.AddComponent<AudioSource>();
         
         SetupSource(_sourceA);
         SetupSource(_sourceB);
+
+        // Preload bojových a boss tracků hned při startu (nebo na začátku hry)
+        PreloadAudioClips(_globalData.ActionTracks);
+        PreloadAudioClips(_globalData.BossTracks);
     }
 
     private void SetupSource(AudioSource source)
@@ -44,10 +44,22 @@ public class MusicManager : PersistentSingleton<MusicManager>
         source.loop = true;
         source.playOnAwake = false;
         source.volume = 0f;
-        source.spatialBlend = 0f; // 2D zvuk
+        source.spatialBlend = 0f;
     }
 
-    // --- Veřejné API ---
+    // Explicitní asynchronní načtení audia do RAM, zabrání lagu při prvním Play()
+    private void PreloadAudioClips(List<AudioClip> clips)
+    {
+        if (clips == null) return;
+        
+        foreach (var clip in clips)
+        {
+            if (clip != null && clip.loadState != AudioDataLoadState.Loaded)
+            {
+                clip.LoadAudioData(); // Načítá se na pozadí, neblokuje vlákno
+            }
+        }
+    }
 
     public void SetState(MusicState newState)
     {
@@ -59,6 +71,14 @@ public class MusicManager : PersistentSingleton<MusicManager>
     public void EnterLocation(LocationProfile profile)
     {
         _currentLocation = profile;
+
+        if (_currentLocation != null)
+        {
+            // Můžeme preloadnout i lokace, když do nich hráč vstoupí
+            PreloadAudioClips(_currentLocation.DayTracks);
+            PreloadAudioClips(_currentLocation.NightTracks);
+        }
+
         if (_currentState == MusicState.Exploration)
         {
             RefreshMusic(_locationCrossfadeTime);
@@ -82,8 +102,6 @@ public class MusicManager : PersistentSingleton<MusicManager>
         _currentState = MusicState.Menu;
         CrossfadeTo(_globalData.MenuTrack, 1.0f);
     }
-
-    // --- Logika výběru hudby ---
 
     private void RefreshMusic(float fadeDuration)
     {
@@ -112,7 +130,6 @@ public class MusicManager : PersistentSingleton<MusicManager>
                 break;
         }
 
-        // Pokud je klip stejný jako ten, co hraje, neděláme nic (nepřerušujeme smyčku)
         AudioSource activeSource = _isSourceAActive ? _sourceA : _sourceB;
         if (activeSource.clip == nextClip && activeSource.isPlaying) return;
 
@@ -125,8 +142,6 @@ public class MusicManager : PersistentSingleton<MusicManager>
         return clips[Random.Range(0, clips.Count)];
     }
 
-    // --- Crossfade Logika ---
-
     private void CrossfadeTo(AudioClip newClip, float duration)
     {
         if (_fadeRoutine != null) StopCoroutine(_fadeRoutine);
@@ -138,23 +153,19 @@ public class MusicManager : PersistentSingleton<MusicManager>
         AudioSource activeSource = _isSourceAActive ? _sourceA : _sourceB;
         AudioSource newSource = _isSourceAActive ? _sourceB : _sourceA;
 
-        // 1. Příprava nového zdroje
         newSource.clip = newClip;
         if (newClip != null) newSource.Play();
 
         float timer = 0f;
         float startVolume = activeSource.volume;
 
-        // 2. Prolínání
         while (timer < duration)
         {
-            timer += Time.unscaledDeltaTime; // Unscaled, aby hudba hrála i v pauze
+            timer += Time.unscaledDeltaTime;
             float t = timer / duration;
 
-            // Aktivní zdroj jde do ticha
             activeSource.volume = Mathf.Lerp(startVolume, 0f, t);
             
-            // Nový zdroj jde na MasterVolume (pokud existuje klip)
             if (newClip != null)
             {
                 newSource.volume = Mathf.Lerp(0f, _masterVolume, t);
@@ -163,7 +174,6 @@ public class MusicManager : PersistentSingleton<MusicManager>
             yield return null;
         }
 
-        // 3. Dokončení
         activeSource.Stop();
         activeSource.volume = 0f;
         
@@ -172,7 +182,6 @@ public class MusicManager : PersistentSingleton<MusicManager>
             newSource.volume = _masterVolume;
         }
 
-        // Prohození rolí
         _isSourceAActive = !_isSourceAActive;
     }
 }

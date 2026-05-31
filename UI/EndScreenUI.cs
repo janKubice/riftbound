@@ -55,6 +55,7 @@ public class EndScreenUI : MonoBehaviour
         if (NetworkManager.Singleton.IsHost)
         {
             // Host přenačte síťovou scénu pro všechny
+            Time.timeScale = 1f;
             NetworkManager.Singleton.SceneManager.LoadScene("GameScene", UnityEngine.SceneManagement.LoadSceneMode.Single);
         }
     }

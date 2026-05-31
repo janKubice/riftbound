@@ -91,6 +91,7 @@ public class EnemyMovementManager : MonoBehaviour
 
     private readonly List<EnemyBaseAI> _registeredEnemies = new List<EnemyBaseAI>(3000);
     private readonly List<EnemyBaseAI> _movingEnemies = new List<EnemyBaseAI>(3000);
+    public IReadOnlyList<EnemyBaseAI> MovingEnemies => _movingEnemies;
 
     private NativeArray<float3> _positions;
     private NativeArray<float3> _targetPositions;
@@ -259,7 +260,30 @@ public class EnemyMovementManager : MonoBehaviour
             PersonalSideBias = _personalSideBias
         }.Schedule(count, 64, crowdHandle);
 
-        _crowdMovementDependency = finalDirectionHandle;
+        int obstacleMask = _localObstacleMask.value;
+        if (obstacleMask == 0 && FlowFieldManager.Instance != null)
+            obstacleMask = FlowFieldManager.Instance.ObstacleMask.value;
+
+        JobHandle setupSpherecastHandle = new SetupSpherecastCommandsJob
+        {
+            Positions = _positions,
+            FinalDirections = _finalDirections,
+            Commands = _avoidanceCommands,
+            Height = _avoidanceHeight,
+            Radius = _avoidanceSphereRadius,
+            MaxDistance = _avoidanceDistance,
+            LayerMask = obstacleMask
+        }.Schedule(count, 64, finalDirectionHandle);
+
+        // ScheduleBatch odešle všechny commandy do fyzikálního enginu C++ jádra najednou
+        JobHandle spherecastHandle = SpherecastCommand.ScheduleBatch(
+            _avoidanceCommands,
+            _avoidanceHits,
+            32,
+            setupSpherecastHandle
+        );
+
+        _crowdMovementDependency = spherecastHandle;
     }
 
     private void LateUpdate()
@@ -442,8 +466,8 @@ public class EnemyMovementManager : MonoBehaviour
             EnemyBaseAI enemy = _movingEnemies[i];
             _positions[i] = enemy.MyTransform.position;
             _targetPositions[i] = enemy.TargetPlayer.position;
-            
-            _preferredSides[i] = enemy.StablePreferredSide; 
+
+            _preferredSides[i] = enemy.StablePreferredSide;
         }
     }
 
@@ -482,7 +506,35 @@ public class EnemyMovementManager : MonoBehaviour
                 continue;
 
             Vector3 desiredDirection = ToVector3(_finalDirections[i]);
-            desiredDirection = ApplyLocalObstacleAvoidance(enemy, desiredDirection);
+
+            // Přečteme výsledek asynchronní fyziky z pole
+            if (_useLocalObstacleAvoidance && desiredDirection.sqrMagnitude >= 0.0001f)
+            {
+                RaycastHit hit = _avoidanceHits[i];
+
+                // Pokud normal != zero, znamená to, že SphereCast něco trefil
+                if (hit.normal != Vector3.zero)
+                {
+                    Vector3 normalizedDirection = desiredDirection.normalized;
+                    Vector3 flatNormal = Vector3.ProjectOnPlane(hit.normal, Vector3.up);
+
+                    if (flatNormal.sqrMagnitude >= 0.0001f)
+                    {
+                        flatNormal.Normalize();
+                        Vector3 tangentA = Vector3.Cross(Vector3.up, flatNormal).normalized;
+                        Vector3 tangentB = -tangentA;
+                        Vector3 tangent = Vector3.Dot(tangentA, normalizedDirection) >= Vector3.Dot(tangentB, normalizedDirection)
+                            ? tangentA
+                            : tangentB;
+
+                        Vector3 steerDirection = (tangent * 0.85f + flatNormal * 0.15f).normalized;
+                        float closeness = 1f - Mathf.Clamp01(hit.distance / _avoidanceDistance);
+                        float blend = _avoidanceBlend * Mathf.Lerp(0.35f, 1f, closeness);
+
+                        desiredDirection = Vector3.Slerp(normalizedDirection, steerDirection, blend).normalized;
+                    }
+                }
+            }
 
             enemy.ManualMove(desiredDirection * enemy.CurrentSpeed);
         }
@@ -572,6 +624,9 @@ public class EnemyMovementManager : MonoBehaviour
         _finalDirections = new NativeArray<float3>(capacity, Allocator.Persistent);
         _preferredSides = new NativeArray<float>(capacity, Allocator.Persistent);
         _spatialHash = new NativeParallelMultiHashMap<int, int>(capacity, Allocator.Persistent);
+
+        _avoidanceCommands = new NativeArray<SpherecastCommand>(capacity, Allocator.Persistent);
+        _avoidanceHits = new NativeArray<RaycastHit>(capacity, Allocator.Persistent);
     }
 
     private void DisposeNativeData()
@@ -583,6 +638,9 @@ public class EnemyMovementManager : MonoBehaviour
         if (_finalDirections.IsCreated) _finalDirections.Dispose();
         if (_preferredSides.IsCreated) _preferredSides.Dispose();
         if (_spatialHash.IsCreated) _spatialHash.Dispose();
+
+        if (_avoidanceCommands.IsCreated) _avoidanceCommands.Dispose();
+        if (_avoidanceHits.IsCreated) _avoidanceHits.Dispose();
     }
 
     private static Vector3 ToVector3(float3 value)
@@ -833,6 +891,41 @@ public class EnemyMovementManager : MonoBehaviour
             }
 
             Output[index] = new float3(direct.x, 0f, direct.y);
+        }
+    }
+
+    [BurstCompile]
+    private struct SetupSpherecastCommandsJob : IJobParallelFor
+    {
+        [ReadOnly] public NativeArray<float3> Positions;
+        [ReadOnly] public NativeArray<float3> FinalDirections;
+        [WriteOnly] public NativeArray<SpherecastCommand> Commands;
+
+        public float Height;
+        public float Radius;
+        public float MaxDistance;
+        public int LayerMask;
+
+        public void Execute(int index)
+        {
+            float3 pos = Positions[index];
+            float3 dir = FinalDirections[index];
+
+            // Nastavení pro moderní Unity Physics (ignoruje triggery)
+            // Čtvrtý parametr (hitBackfaces) je explicitně false
+            QueryParameters query = new QueryParameters(LayerMask, false, QueryTriggerInteraction.Ignore, false);
+
+            // Pokud se entita nehýbe, vytvoříme dummy cast s délkou 0
+            if (math.lengthsq(dir) < 0.0001f)
+            {
+                Commands[index] = new SpherecastCommand(pos, 0f, new float3(0, 1, 0), query, 0f);
+                return;
+            }
+
+            float3 origin = pos + new float3(0, Height, 0);
+            float3 normDir = math.normalize(dir);
+
+            Commands[index] = new SpherecastCommand(origin, Radius, normDir, query, MaxDistance);
         }
     }
 

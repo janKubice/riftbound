@@ -106,6 +106,9 @@ public class DirectorSpawner : NetworkBehaviour
     public NetworkVariable<int> CurrentPhaseIndexNetVar = new NetworkVariable<int>(-1);
     public NetworkVariable<int> CurrentPhaseTypeNetVar = new NetworkVariable<int>((int)RunPhaseType.Warmup);
     public NetworkVariable<int> CurrentPressurePercentNetVar = new NetworkVariable<int>(100);
+    [Header("Network UI - Time Info")]
+    public NetworkVariable<float> PhaseEndTimeSecondsNetVar = new NetworkVariable<float>(0f);
+    public NetworkVariable<bool> IsSpawningPausedNetVar = new NetworkVariable<bool>(false);
 
     public static event Action OnEnemySpawned;
     public static event Action<DangerRhythmPhase> OnServerPhaseChanged;
@@ -145,6 +148,7 @@ public class DirectorSpawner : NetworkBehaviour
         WaveCountdownNetVar.Value = 0f;
         CurrentMaxEnemiesNetVar.Value = 0;
         CurrentSpawnRatePerSecondNetVar.Value = 0f;
+        PhaseEndTimeSecondsNetVar.Value = 0f;
 
         CurrentDifficultyPercent.Value = 100;
         RunTimeSecondsNetVar.Value = 0;
@@ -307,6 +311,8 @@ public class DirectorSpawner : NetworkBehaviour
     {
         CurrentPhaseIndexNetVar.Value = phaseIndex;
         CurrentPhaseTypeNetVar.Value = phase != null ? (int)phase.PhaseType : (int)RunPhaseType.Warmup;
+        PhaseEndTimeSecondsNetVar.Value = phase != null ? phase.EndMinute * 60f : 0f;
+        IsSpawningPausedNetVar.Value = phase != null && phase.PauseRegularSpawns;
     }
 
     private float GetCurrentPressureMultiplier()
@@ -756,7 +762,7 @@ public class DirectorSpawner : NetworkBehaviour
         AwardStatToAllConnectedPlayers(SteamStatIds.DemoVictories, 1);
         ShowVictoryScreenClientRpc();
     }
-    
+
     [ClientRpc]
     private void ShowVictoryScreenClientRpc()
     {

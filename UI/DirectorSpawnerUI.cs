@@ -16,6 +16,10 @@ public class DirectorSpawnerUI : MonoBehaviour
     [SerializeField] private TextMeshProUGUI _waveNumberText;
     [SerializeField] private TextMeshProUGUI _enemiesRemainingText;
 
+    [Header("Chill Time UI")]
+    [SerializeField] private GameObject _chillTimePanel;
+    [SerializeField] private TextMeshProUGUI _chillTimeText;
+
     [Header("Options")]
     [SerializeField] private bool _showContinuousPanel = true;
     [SerializeField] private bool _showWavePanel = true;
@@ -108,17 +112,34 @@ public class DirectorSpawnerUI : MonoBehaviour
         {
             int alive = spawner.EnemiesAliveNetVar.Value;
             int max = spawner.CurrentMaxEnemiesNetVar.Value;
-
-            if (max > 0)
-                _aliveEnemiesText.text = $"Enemies: {alive}/{max}";
-            else
-                _aliveEnemiesText.text = $"Enemies: {alive}";
+            _aliveEnemiesText.text = max > 0 ? $"Enemies: {alive}/{max}" : $"Enemies: {alive}";
         }
 
         if (_spawnRateText != null)
         {
             float spawnRate = spawner.CurrentSpawnRatePerSecondNetVar.Value;
             _spawnRateText.text = $"Spawn Rate: {spawnRate:0.0}/s";
+        }
+
+        // --- NOVÁ LOGIKA PRO PAUZY ---
+        bool isChillPhase = spawner.IsSpawningPausedNetVar.Value;
+
+        SetActiveSafe(_chillTimePanel, isChillPhase);
+
+        if (isChillPhase && _chillTimeText != null)
+        {
+            RunPhaseType phaseType = (RunPhaseType)spawner.CurrentPhaseTypeNetVar.Value;
+            float remainingSeconds = spawner.PhaseEndTimeSecondsNetVar.Value - spawner.RunTimeSecondsNetVar.Value;
+            remainingSeconds = Mathf.Max(0f, remainingSeconds);
+
+            if (phaseType == RunPhaseType.Warmup)
+            {
+                _chillTimeText.text = $"STARTS IN: <color=#A8E6A3>{Mathf.CeilToInt(remainingSeconds)}s</color>";
+            }
+            else
+            {
+                _chillTimeText.text = $"CHILL TIME: <color=#7DDCFF>{Mathf.CeilToInt(remainingSeconds)}s</color>";
+            }
         }
     }
 

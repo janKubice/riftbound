@@ -2,6 +2,9 @@ using System.Collections.Generic;
 using Unity.Collections;
 using Unity.Mathematics;
 using UnityEngine;
+using Unity.Jobs;
+using Unity.Burst;
+using Unity.Collections.LowLevel.Unsafe;
 
 public struct FlowCell
 {
@@ -59,6 +62,11 @@ public class FlowFieldManager : MonoBehaviour
 
     [Header("Debug")]
     [SerializeField] private bool _drawGridBounds = true;
+
+    private NativeArray<RaycastCommand> _raycastCmds;
+    private NativeArray<RaycastHit> _raycastHits;
+    private NativeArray<BoxcastCommand> _boxcastCmds;
+    private NativeArray<RaycastHit> _boxcastHits;
 
     private readonly int2[] _neighborOffsets =
     {
@@ -119,47 +127,22 @@ public class FlowFieldManager : MonoBehaviour
         if (!TryFindNearestWalkableCell(requestedTarget, out int2 targetCell))
             return;
 
-        ResetIntegratedField();
-
-        _cellsToCheck.Clear();
-
-        int targetIndex = ToIndex(targetCell);
-        FlowCell startCell = Grid[targetIndex];
-        startCell.BestCost = 0;
-        startCell.Direction = float2.zero;
-        Grid[targetIndex] = startCell;
-
-        _cellsToCheck.Enqueue(targetCell);
-
-        while (_cellsToCheck.Count > 0)
+        // 1. Spuštění Burst-compiled BFS Jobu
+        new FlowFieldBFSJob
         {
-            int2 current = _cellsToCheck.Dequeue();
-            int currentIndex = ToIndex(current);
-            ushort currentCost = Grid[currentIndex].BestCost;
+            Grid = Grid,
+            TargetCell = targetCell,
+            GridWidth = GridWidth,
+            GridHeight = GridHeight
+        }.Schedule().Complete(); // Blokuje vlákno, ale trvá to zlomky milisekundy
 
-            foreach (int2 offset in _neighborOffsets)
-            {
-                int2 neighbor = current + offset;
-
-                if (!CanStep(current, neighbor))
-                    continue;
-
-                int neighborIndex = ToIndex(neighbor);
-                FlowCell neighborCell = Grid[neighborIndex];
-
-                int moveCost = IsDiagonal(offset) ? 14 : 10;
-                int candidate = currentCost + (moveCost * neighborCell.Cost);
-
-                if (candidate < neighborCell.BestCost && candidate < ushort.MaxValue)
-                {
-                    neighborCell.BestCost = (ushort)candidate;
-                    Grid[neighborIndex] = neighborCell;
-                    _cellsToCheck.Enqueue(neighbor);
-                }
-            }
-        }
-
-        BuildDirectionField();
+        // 2. Sestavení vektorového pole přes paralelní Job
+        new BuildDirectionFieldJob
+        {
+            Grid = Grid,
+            GridWidth = GridWidth,
+            GridHeight = GridHeight
+        }.Schedule(Grid.Length, 64).Complete();
     }
 
     public void ForceRecenterAround(Vector3 targetWorldPosition)
@@ -213,47 +196,45 @@ public class FlowFieldManager : MonoBehaviour
 
     public void GenerateCostField()
     {
-        if (!Grid.IsCreated)
-            return;
+        if (!Grid.IsCreated) return;
 
+        int cellCount = GridWidth * GridHeight;
         float horizontalProbeHalfExtent = CellSize * 0.45f + _agentRadius + _obstaclePadding;
         Vector3 halfExtents = new Vector3(horizontalProbeHalfExtent, _obstacleProbeHalfHeight, horizontalProbeHalfExtent);
 
-        for (int x = 0; x < GridWidth; x++)
+        // Fáze 1: Paprsky dolů pro zjištění terénu
+        var setupRaycasts = new SetupTerrainRaycastsJob
         {
-            for (int y = 0; y < GridHeight; y++)
-            {
-                int index = ToIndex(new int2(x, y));
-                FlowCell cell = Grid[index];
+            GridWidth = GridWidth,
+            GridHeight = GridHeight,
+            CellSize = CellSize,
+            GridOrigin = GridOrigin,
+            Commands = _raycastCmds,
+            LayerMask = TerrainMask.value
+        }.Schedule(cellCount, 64);
 
-                Vector3 cellCenterXZ = GetCellCenterWorld(x, y);
-                Vector3 rayStart = new Vector3(cellCenterXZ.x, 1000f, cellCenterXZ.z);
+        JobHandle raycastHandle = RaycastCommand.ScheduleBatch(_raycastCmds, _raycastHits, 64, setupRaycasts);
 
-                if (Physics.Raycast(rayStart, Vector3.down, out RaycastHit hit, 2000f, TerrainMask, QueryTriggerInteraction.Ignore))
-                {
-                    float slopeAngle = Vector3.Angle(Vector3.up, hit.normal);
+        // Fáze 2: Na základě hitů terénu připravíme Boxcasty pro překážky
+        var setupBoxcasts = new SetupObstacleBoxcastsJob
+        {
+            RaycastHits = _raycastHits,
+            Commands = _boxcastCmds,
+            HalfExtents = halfExtents,
+            LayerMask = ObstacleMask.value,
+            MaxSlope = _maxWalkableSlope
+        }.Schedule(cellCount, 64, raycastHandle);
 
-                    if (slopeAngle > _maxWalkableSlope)
-                    {
-                        cell.Cost = 255;
-                    }
-                    else
-                    {
-                        Vector3 boxCenter = hit.point + Vector3.up * (halfExtents.y + 0.1f);
-                        bool blocked = Physics.CheckBox(boxCenter, halfExtents, Quaternion.identity, ObstacleMask, QueryTriggerInteraction.Ignore);
-                        cell.Cost = blocked ? (byte)255 : (byte)1;
-                    }
-                }
-                else
-                {
-                    cell.Cost = 255;
-                }
+        JobHandle boxcastHandle = BoxcastCommand.ScheduleBatch(_boxcastCmds, _boxcastHits, 64, setupBoxcasts);
 
-                cell.BestCost = ushort.MaxValue;
-                cell.Direction = float2.zero;
-                Grid[index] = cell;
-            }
-        }
+        // Fáze 3: Zápis výsledků do mřížky
+        new FinalizeCostFieldJob
+        {
+            RaycastHits = _raycastHits,
+            BoxcastHits = _boxcastHits,
+            Grid = Grid,
+            MaxSlope = _maxWalkableSlope
+        }.Schedule(cellCount, 64, boxcastHandle).Complete(); // Zde hlavní vlákno čeká na fyzikální engine
 
         _costFieldGenerated = true;
     }
@@ -472,14 +453,24 @@ public class FlowFieldManager : MonoBehaviour
     private void AllocateGrid()
     {
         DisposeGrid();
-        Grid = new NativeArray<FlowCell>(GridWidth * GridHeight, Allocator.Persistent);
+        int count = GridWidth * GridHeight;
+        Grid = new NativeArray<FlowCell>(count, Allocator.Persistent);
+
+        _raycastCmds = new NativeArray<RaycastCommand>(count, Allocator.Persistent);
+        _raycastHits = new NativeArray<RaycastHit>(count, Allocator.Persistent);
+        _boxcastCmds = new NativeArray<BoxcastCommand>(count, Allocator.Persistent);
+        _boxcastHits = new NativeArray<RaycastHit>(count, Allocator.Persistent);
+
         _costFieldGenerated = false;
     }
 
     private void DisposeGrid()
     {
-        if (Grid.IsCreated)
-            Grid.Dispose();
+        if (Grid.IsCreated) Grid.Dispose();
+        if (_raycastCmds.IsCreated) _raycastCmds.Dispose();
+        if (_raycastHits.IsCreated) _raycastHits.Dispose();
+        if (_boxcastCmds.IsCreated) _boxcastCmds.Dispose();
+        if (_boxcastHits.IsCreated) _boxcastHits.Dispose();
     }
 
     private void OnDrawGizmosSelected()
@@ -518,6 +509,254 @@ public class FlowFieldManager : MonoBehaviour
 
             Gizmos.color = Color.yellow;
             Gizmos.DrawWireCube(mapCenter, mapSize);
+        }
+    }
+
+    [BurstCompile]
+    private struct SetupTerrainRaycastsJob : IJobParallelFor
+    {
+        [WriteOnly] public NativeArray<RaycastCommand> Commands;
+        public int GridWidth;
+        public int GridHeight;
+        public float CellSize;
+        public float3 GridOrigin;
+        public int LayerMask;
+
+        public void Execute(int index)
+        {
+            int x = index % GridWidth;
+            int y = index / GridWidth;
+
+            float3 cellCenter = new float3(
+                GridOrigin.x + (x + 0.5f) * CellSize,
+                1000f,
+                GridOrigin.z + (y + 0.5f) * CellSize
+            );
+
+            QueryParameters query = new QueryParameters(LayerMask, false, QueryTriggerInteraction.Ignore, false);
+            Commands[index] = new RaycastCommand(cellCenter, new float3(0, -1, 0), query, 2000f);
+        }
+    }
+
+    [BurstCompile]
+    private struct SetupObstacleBoxcastsJob : IJobParallelFor
+    {
+        [ReadOnly] public NativeArray<RaycastHit> RaycastHits;
+        [WriteOnly] public NativeArray<BoxcastCommand> Commands;
+        public float3 HalfExtents;
+        public int LayerMask;
+        public float MaxSlope;
+
+        public void Execute(int index)
+        {
+            RaycastHit groundHit = RaycastHits[index];
+            bool isWalkable = false;
+
+            if (groundHit.colliderInstanceID != 0)
+            {
+                float slopeAngle = math.degrees(math.acos(math.clamp(groundHit.normal.y, -1f, 1f)));
+                if (slopeAngle <= MaxSlope) isWalkable = true;
+            }
+
+            QueryParameters query = new QueryParameters(LayerMask, false, QueryTriggerInteraction.Ignore, false);
+
+            if (isWalkable)
+            {
+                float3 boxCenter = (float3)groundHit.point + new float3(0, HalfExtents.y + 0.1f, 0);
+                Commands[index] = new BoxcastCommand(boxCenter, HalfExtents, quaternion.identity, new float3(0, -1, 0), query, 0.01f);
+            }
+            else
+            {
+                Commands[index] = new BoxcastCommand(float3.zero, float3.zero, quaternion.identity, new float3(0, 1, 0), query, 0f);
+            }
+        }
+    }
+
+    [BurstCompile]
+    private struct FinalizeCostFieldJob : IJobParallelFor
+    {
+        [ReadOnly] public NativeArray<RaycastHit> RaycastHits;
+        [ReadOnly] public NativeArray<RaycastHit> BoxcastHits;
+        public NativeArray<FlowCell> Grid;
+        public float MaxSlope;
+
+        public void Execute(int index)
+        {
+            FlowCell cell = Grid[index];
+            RaycastHit groundHit = RaycastHits[index];
+
+            if (groundHit.colliderInstanceID == 0)
+            {
+                cell.Cost = 255;
+            }
+            else
+            {
+                float slopeAngle = math.degrees(math.acos(math.clamp(groundHit.normal.y, -1f, 1f)));
+                if (slopeAngle > MaxSlope)
+                {
+                    cell.Cost = 255;
+                }
+                else
+                {
+                    RaycastHit obstacleHit = BoxcastHits[index];
+                    cell.Cost = obstacleHit.colliderInstanceID != 0 ? (byte)255 : (byte)1;
+                }
+            }
+
+            cell.BestCost = ushort.MaxValue;
+            cell.Direction = float2.zero;
+            Grid[index] = cell;
+        }
+    }
+
+    [BurstCompile]
+    private struct FlowFieldBFSJob : IJob
+    {
+        public NativeArray<FlowCell> Grid;
+        public int2 TargetCell;
+        public int GridWidth;
+        public int GridHeight;
+
+        public void Execute()
+        {
+            for (int i = 0; i < Grid.Length; i++)
+            {
+                FlowCell c = Grid[i];
+                c.BestCost = ushort.MaxValue;
+                c.Direction = float2.zero;
+                Grid[i] = c;
+            }
+
+            NativeQueue<int2> queue = new NativeQueue<int2>(Allocator.Temp);
+            int targetIndex = TargetCell.x + TargetCell.y * GridWidth;
+
+            FlowCell startCell = Grid[targetIndex];
+            startCell.BestCost = 0;
+            Grid[targetIndex] = startCell;
+
+            queue.Enqueue(TargetCell);
+
+            NativeArray<int2> offsets = new NativeArray<int2>(8, Allocator.Temp);
+            offsets[0] = new int2(0, 1); offsets[1] = new int2(0, -1);
+            offsets[2] = new int2(1, 0); offsets[3] = new int2(-1, 0);
+            offsets[4] = new int2(1, 1); offsets[5] = new int2(-1, -1);
+            offsets[6] = new int2(1, -1); offsets[7] = new int2(-1, 1);
+
+            while (queue.TryDequeue(out int2 current))
+            {
+                int currentIndex = current.x + current.y * GridWidth;
+                ushort currentCost = Grid[currentIndex].BestCost;
+
+                for (int i = 0; i < 8; i++)
+                {
+                    int2 offset = offsets[i];
+                    int2 neighbor = current + offset;
+
+                    if (!CanStep(current, neighbor)) continue;
+
+                    int neighborIndex = neighbor.x + neighbor.y * GridWidth;
+                    FlowCell neighborCell = Grid[neighborIndex];
+
+                    int moveCost = (offset.x != 0 && offset.y != 0) ? 14 : 10;
+                    int candidate = currentCost + (moveCost * neighborCell.Cost);
+
+                    if (candidate < neighborCell.BestCost && candidate < ushort.MaxValue)
+                    {
+                        neighborCell.BestCost = (ushort)candidate;
+                        Grid[neighborIndex] = neighborCell;
+                        queue.Enqueue(neighbor);
+                    }
+                }
+            }
+
+            queue.Dispose();
+            offsets.Dispose();
+        }
+
+        private bool CanStep(int2 from, int2 to)
+        {
+            if (!IsWalkable(to)) return false;
+            int dx = to.x - from.x;
+            int dy = to.y - from.y;
+            if (dx != 0 && dy != 0)
+            {
+                if (!IsWalkable(new int2(from.x + dx, from.y))) return false;
+                if (!IsWalkable(new int2(from.x, from.y + dy))) return false;
+            }
+            return true;
+        }
+
+        private bool IsWalkable(int2 cell)
+        {
+            if (cell.x < 0 || cell.x >= GridWidth || cell.y < 0 || cell.y >= GridHeight) return false;
+            return Grid[cell.x + cell.y * GridWidth].Cost != 255;
+        }
+    }
+
+    [BurstCompile]
+    private struct BuildDirectionFieldJob : IJobParallelFor
+    {
+        [NativeDisableParallelForRestriction]
+        public NativeArray<FlowCell> Grid;
+        public int GridWidth;
+        public int GridHeight;
+
+        public void Execute(int index)
+        {
+            FlowCell cell = Grid[index];
+            if (cell.Cost == 255 || cell.BestCost == ushort.MaxValue) return;
+
+            int2 current = new int2(index % GridWidth, index / GridWidth);
+
+            NativeArray<int2> offsets = new NativeArray<int2>(8, Allocator.Temp);
+            offsets[0] = new int2(0, 1); offsets[1] = new int2(0, -1);
+            offsets[2] = new int2(1, 0); offsets[3] = new int2(-1, 0);
+            offsets[4] = new int2(1, 1); offsets[5] = new int2(-1, -1);
+            offsets[6] = new int2(1, -1); offsets[7] = new int2(-1, 1);
+
+            ushort bestCost = cell.BestCost;
+            int2 bestDirection = int2.zero;
+
+            for (int i = 0; i < 8; i++)
+            {
+                int2 offset = offsets[i];
+                int2 neighbor = current + offset;
+
+                if (!CanStep(current, neighbor)) continue;
+
+                ushort neighborCost = Grid[neighbor.x + neighbor.y * GridWidth].BestCost;
+                if (neighborCost < bestCost)
+                {
+                    bestCost = neighborCost;
+                    bestDirection = offset;
+                }
+            }
+
+            cell.Direction = bestDirection.x != 0 || bestDirection.y != 0
+                ? math.normalize(new float2(bestDirection.x, bestDirection.y))
+                : float2.zero;
+
+            Grid[index] = cell;
+            offsets.Dispose();
+        }
+
+        private bool CanStep(int2 from, int2 to)
+        {
+            if (!IsWalkable(to)) return false;
+            int dx = to.x - from.x;
+            int dy = to.y - from.y;
+            if (dx != 0 && dy != 0)
+            {
+                if (!IsWalkable(new int2(from.x + dx, from.y))) return false;
+                if (!IsWalkable(new int2(from.x, from.y + dy))) return false;
+            }
+            return true;
+        }
+
+        private bool IsWalkable(int2 cell)
+        {
+            if (cell.x < 0 || cell.x >= GridWidth || cell.y < 0 || cell.y >= GridHeight) return false;
+            return Grid[cell.x + cell.y * GridWidth].Cost != 255;
         }
     }
 }
